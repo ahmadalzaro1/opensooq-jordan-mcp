@@ -1,0 +1,11 @@
+# Local virtualenv (recreate with: python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt)
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Price-watcher state + logs (watch.py)
+watch-*.json
+watch-*.log
