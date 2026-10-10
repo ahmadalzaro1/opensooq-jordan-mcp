@@ -150,7 +150,14 @@ def quality(listing: dict) -> dict:
         title,
     )
     # A complete phone can mention included accessories; require a product-focused title.
-    if accessory and not re.search(r"\b(with|including|includes)\b|معه|مع |يشمل|هدية|هديه", title):
+    product_position = re.search(r"iphone|ايفون|اي فون|galaxy|سامسونج|جالاكسي|جالكسي", title)
+    accessory_first = accessory and (
+        product_position is None or accessory.start() < product_position.start()
+    )
+    if accessory and (
+        accessory_first
+        or not re.search(r"\b(with|including|includes)\b|معه|مع |يشمل|هدية|هديه", title)
+    ):
         risks.append("accessory")
     if re.search(
         r"\b(installments?|down payment|deposit|monthly payment)\b|تقسيط|اقساط|قسط|دفعة اول[ىي]|دفعه اول[ىي]",

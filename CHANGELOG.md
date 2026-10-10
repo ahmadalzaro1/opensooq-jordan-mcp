@@ -12,7 +12,7 @@
 - Truthful unknown dates, typed upstream metadata, deduplicated seller inventory.
 - Watcher overlap locks, atomic writes, robust state validation and webhook chunking.
 - Installer dependency provisioning fix, selected-client mode and config validation.
-- Locked dependencies, 90 regression tests, full live stdio verification and a
+- Locked dependencies, 91 regression tests, full live stdio verification and a
   Linux/macOS/Windows CI matrix.
 
 ### Response behavior changes

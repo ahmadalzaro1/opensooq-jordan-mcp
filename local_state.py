@@ -32,8 +32,10 @@ def exclusive_lock(path: Path):
         if os.name == "nt":
             import msvcrt
 
-            handle.seek(0)
-            if not handle.read(1):
+            # Windows forbids reading another handle's locked byte. Inspect the
+            # file length without touching that byte before attempting the lock.
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)

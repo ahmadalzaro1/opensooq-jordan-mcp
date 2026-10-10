@@ -4,7 +4,7 @@ Original upstream baseline: `1f87cac1a07b6bda74a98fc2ee6caebe7e0c0bba`.
 
 ## Local regression and startup verification
 
-- **90 regression tests passed** on Python 3.12.
+- **91 regression tests passed** on Python 3.12.
 - Ruff lint and format checks passed.
 - The actual production launch command (`uv run --locked --directory … server.py`)
   completed MCP initialize/list-tools/call-tool and returned 14 Jordan cities.

@@ -421,3 +421,8 @@ def test_other_model_mentioned_in_description_does_not_match():
     assert not match_listing(
         "iphone 15 pro", item("iPhone 14 Pro", description="Also available: iPhone 15 Pro")
     )
+
+
+def test_accessory_first_title_is_not_a_complete_phone():
+    assert "accessory" in item("Case with iPhone 15 Pro design")["quality"]["risk_flags"]
+    assert "accessory" not in item("iPhone 15 Pro with charger included")["quality"]["risk_flags"]
