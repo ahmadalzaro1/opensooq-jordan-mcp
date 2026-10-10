@@ -1,0 +1,245 @@
+{
+  "jo": {
+    "name": "Jordan",
+    "currency": "JOD",
+    "categories": {
+      "1775": {
+        "en": "Autos",
+        "ar": "سيارات ومركبات",
+        "url": "cars"
+      },
+      "5505": {
+        "en": "Mobile - Tablet",
+        "ar": "موبايل - تابلت",
+        "url": "mobile-phones-tablets"
+      },
+      "2143": {
+        "en": "Gaming & Toys",
+        "ar": "ألعاب وألعاب الفيديو",
+        "url": "gaming-consoles"
+      },
+      "13741": {
+        "en": "Computers & Laptops",
+        "ar": "لابتوب وكمبيوتر",
+        "url": "computers-and-laptops"
+      },
+      "2131": {
+        "en": "Electronics & Appliances",
+        "ar": "أجهزة الكترونية وأجهزة منزلية",
+        "url": "electronics-appliances"
+      },
+      "7713": {
+        "en": "Property For Sale",
+        "ar": "عقارات للبيع",
+        "url": "property/property-for-sale"
+      },
+      "8035": {
+        "en": "Property For Rent",
+        "ar": "عقارات للايجار",
+        "url": "property/property-for-rent"
+      },
+      "2181": {
+        "en": "Home & Garden",
+        "ar": "منزل وحديقة",
+        "url": "home-garden"
+      },
+      "54963": {
+        "en": "Fashion And Kids",
+        "ar": "موضة وأطفال",
+        "url": "fashion-and-kids"
+      },
+      "54965": {
+        "en": "Beauty & Health",
+        "ar": "جمال وصحة",
+        "url": "beauty-and-health"
+      },
+      "7105": {
+        "en": "Food",
+        "ar": "طعام - غذاء",
+        "url": "food-suppliments"
+      },
+      "88": {
+        "en": "Services",
+        "ar": "الخدمات",
+        "url": "services"
+      },
+      "15981": {
+        "en": "Jobs",
+        "ar": "وظائف",
+        "url": "jobs"
+      },
+      "4275": {
+        "en": "Pets & Accessories",
+        "ar": "حيوانات وإكسسوارات",
+        "url": "pets"
+      },
+      "15061": {
+        "en": "Leisure & Collectibles",
+        "ar": "ترفيه وكتب ومقتنيات",
+        "url": "books-and-hobbies"
+      },
+      "15101": {
+        "en": "Sports & Fitness",
+        "ar": "معدات رياضية ولياقة",
+        "url": "sports-and-fitness"
+      },
+      "5141": {
+        "en": "Businesses & Equipment",
+        "ar": "شركات ومعدات",
+        "url": "businesses-industrial"
+      }
+    },
+    "cities": {
+      "174": {
+        "en": "Ajloun",
+        "ar": "عجلون",
+        "url": "ajloun"
+      },
+      "89": {
+        "en": "Al Karak",
+        "ar": "الكرك",
+        "url": "al-karak"
+      },
+      "59": {
+        "en": "Amman",
+        "ar": "عمان",
+        "url": "amman"
+      },
+      "61": {
+        "en": "Aqaba",
+        "ar": "العقبة",
+        "url": "aqaba"
+      },
+      "60": {
+        "en": "Irbid",
+        "ar": "إربد",
+        "url": "irbid"
+      },
+      "91": {
+        "en": "Jerash",
+        "ar": "جرش",
+        "url": "jerash"
+      },
+      "655": {
+        "en": "Jordan Valley",
+        "ar": "الغور",
+        "url": "jordan-valley"
+      },
+      "62": {
+        "en": "Ma'an",
+        "ar": "معان",
+        "url": "ma-an"
+      },
+      "128": {
+        "en": "Madaba",
+        "ar": "مادبا",
+        "url": "madaba"
+      },
+      "87": {
+        "en": "Mafraq",
+        "ar": "المفرق",
+        "url": "mafraq"
+      },
+      "214": {
+        "en": "Ramtha",
+        "ar": "الرمثا",
+        "url": "ramtha"
+      },
+      "92": {
+        "en": "Salt",
+        "ar": "السلط",
+        "url": "salt"
+      },
+      "175": {
+        "en": "Tafila",
+        "ar": "الطفيلة",
+        "url": "tafila"
+      },
+      "83": {
+        "en": "Zarqa",
+        "ar": "الزرقاء",
+        "url": "zarqa"
+      }
+    },
+    "verified_at": "2026-10-10"
+  },
+  "kw": {
+    "name": "Kuwait",
+    "currency": "KWD",
+    "categories": {
+      "1749": {
+        "en": "Autos",
+        "ar": "سيارات ومركبات",
+        "url": "cars"
+      },
+      "5521": {
+        "en": "Mobile - Tablet",
+        "ar": "موبايل - تابلت",
+        "url": "mobile-phones-tablets"
+      },
+      "1873": {
+        "en": "Gaming & Toys",
+        "ar": "ألعاب وألعاب الفيديو",
+        "url": "gaming-consoles"
+      },
+      "13737": {
+        "en": "Computers & Laptops",
+        "ar": "لابتوب وكمبيوتر",
+        "url": "computers-and-laptops"
+      },
+      "1861": {
+        "en": "Electronics & Appliances",
+        "ar": "أجهزة الكترونية وأجهزة منزلية",
+        "url": "electronics-appliances"
+      },
+      "7681": {
+        "en": "Property For Sale",
+        "ar": "عقارات للبيع",
+        "url": "property/property-for-sale"
+      },
+      "7999": {
+        "en": "Property For Rent",
+        "ar": "عقارات للايجار",
+        "url": "property/property-for-rent"
+      },
+      "1911": {
+        "en": "Home & Garden",
+        "ar": "أثاث - ديكور",
+        "url": "home-garden"
+      }
+    },
+    "cities": {
+      "49": {
+        "en": "Al Ahmadi",
+        "ar": "",
+        "url": ""
+      },
+      "46": {
+        "en": "Al Jahra",
+        "ar": "",
+        "url": ""
+      },
+      "47": {
+        "en": "Farwaniya",
+        "ar": "",
+        "url": ""
+      },
+      "48": {
+        "en": "Hawally",
+        "ar": "",
+        "url": ""
+      },
+      "50": {
+        "en": "Kuwait City",
+        "ar": "",
+        "url": ""
+      },
+      "129": {
+        "en": "Mubarak Al-Kabeer",
+        "ar": "",
+        "url": ""
+      }
+    },
+    "verified_at": null
+  }
+}

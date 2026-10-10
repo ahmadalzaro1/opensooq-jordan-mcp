@@ -28,6 +28,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -100,7 +101,7 @@ def server_entry(uv: str, name: str) -> dict:
     return {
         "command": uv,
         "args": ["run", "--directory", str(HERE), "server.py"],
-        "env": {"PYTHONIOENCODING": "utf-8"},
+        "env": {"PYTHONIOENCODING": "utf-8", "OPENSOOQ_COUNTRY": "jo"},
     }
 
 
@@ -133,10 +134,10 @@ def merge_into(path: Path, name: str, entry: dict) -> str:
         try:
             data = json.loads(path.read_text(encoding="utf-8") or "{}")
         except Exception:
-            backup = path.with_suffix(path.suffix + ".broken.bak")
+            backup = path.with_suffix(path.suffix + f".{time.time_ns()}.broken.bak")
             shutil.copy2(path, backup)
             return f"existing file was not valid JSON; backed up to {backup.name} and skipped"
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        shutil.copy2(path, path.with_suffix(path.suffix + f".{time.time_ns()}.bak"))
     servers = data.setdefault("mcpServers", {})
     action = "updated" if name in servers else "added"
     servers[name] = entry
@@ -152,7 +153,7 @@ def merge_into(path: Path, name: str, entry: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Install the OpenSooq MCP server into your MCP clients.")
     ap.add_argument("--print-only", action="store_true", help="Only print the config; don't modify client files.")
-    ap.add_argument("--name", default="opensooq", help="Server name in the config (default: opensooq).")
+    ap.add_argument("--name", default="opensooq-jordan", help="Server name in the config (default: opensooq-jordan).")
     args = ap.parse_args()
 
     print("OpenSooq MCP — installer\n" + "=" * 28)
@@ -162,7 +163,7 @@ def main() -> int:
         return 1
     print(f"• Found uv: {uv}")
 
-    ok = ensure_runtime(uv)
+    ok = True if args.print_only else ensure_runtime(uv)
     if not ok:
         print("✗ The server failed to start under uv. Fix the error above and re-run.")
         return 1

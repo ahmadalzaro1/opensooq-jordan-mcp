@@ -2,13 +2,13 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mcp>=1.2.0",
-#   "httpx>=0.27.0",
-#   "pydantic>=2.0.0",
+#   "mcp>=1.2.0,<2",
+#   "httpx>=0.27.0,<1",
+#   "pydantic>=2.0.0,<3",
 # ]
 # ///
 """
-Comprehensive MCP server for OpenSooq (Kuwait classifieds).
+Comprehensive MCP server for OpenSooq (Jordan classifieds).
 
 Wraps OpenSooq's private `serp/search/v2` API — the same handshake the web
 client uses (anonymous device registration + derived-key HS256 JWT signing) —
@@ -35,13 +35,14 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mcp.server.fastmcp import FastMCP
 
 import opensooq_client as oc
+from market import resolve_city, resolve_category, PROFILE, COUNTRY, CURRENCY, LANGUAGE
 
-mcp = FastMCP("opensooq_mcp")
+mcp = FastMCP("opensooq_jordan_mcp")
 
 
 # ---------------------------------------------------------------------------
@@ -69,38 +70,8 @@ def _sort_code(order: Optional[SortOrder]) -> Optional[str]:
     return oc.SORT_CODES[order.value] if order else None
 
 
-def _resolve_category(value: Optional[str]) -> Optional[int]:
-    """Resolve a category id or name (en/url, case-insensitive) to a cat1 id."""
-    if value is None:
-        return None
-    value = value.strip()
-    if value.isdigit():
-        return int(value)
-    low = value.lower()
-    for cid, meta in oc.CATEGORIES.items():
-        if low == meta["en"].lower() or low == meta["url"].lower() or low in meta["en"].lower():
-            return cid
-    raise ValueError(
-        f"Unknown category '{value}'. Use opensooq_list_categories to see valid "
-        f"names/ids (e.g. 'Mobile - Tablet' or 5521)."
-    )
-
-
-def _resolve_city(value: Optional[str]) -> Optional[int]:
-    """Resolve a city id or name (case-insensitive) to a city id."""
-    if value is None:
-        return None
-    value = value.strip()
-    if value.isdigit():
-        return int(value)
-    low = value.lower()
-    for cid, name in oc.CITIES.items():
-        if low == name.lower() or low in name.lower():
-            return cid
-    raise ValueError(
-        f"Unknown city '{value}'. Valid cities: {', '.join(oc.CITIES.values())}."
-    )
-
+_resolve_category = resolve_category
+_resolve_city = resolve_city
 
 def _apply_post_filters(
     listings: List[Dict[str, Any]],
@@ -112,6 +83,7 @@ def _apply_post_filters(
     shops_only: bool = False,
     verified_only: bool = False,
     min_seller_rating: Optional[float] = None,
+    min_seller_reviews: int = 0,
 ) -> List[Dict[str, Any]]:
     """Apply client-side refinements OpenSooq does not honor server-side."""
     out = []
@@ -132,6 +104,8 @@ def _apply_post_filters(
             continue
         if min_seller_rating is not None and (s["rating_avg"] or 0) < min_seller_rating:
             continue
+        if s["rating_count"] < min_seller_reviews:
+            continue
         out.append(l)
     return out
 
@@ -140,6 +114,18 @@ def _apply_post_filters(
 _query_tokens = oc.query_tokens
 _relevant_listings = oc.relevant_listings
 _comparable_listings = oc.comparable_listings
+
+
+def _percentile(values: List[float], fraction: float) -> float:
+    position = (len(values) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    return values[lower] + (values[upper] - values[lower]) * (position - lower)
+
+
+def _sample_metadata(listings: List[Dict[str, Any]], pages: int) -> Dict[str, Any]:
+    return {"country": COUNTRY, "pages_requested": pages, "scanned_listings": len(listings),
+            "sample_note": "Sample of asking prices, not completed sales or the entire market. Condition and specifications may differ."}
 
 
 def _price_stats(prices: List[float]) -> Dict[str, float]:
@@ -152,8 +138,8 @@ def _price_stats(prices: List[float]) -> Dict[str, float]:
         "max": s[-1],
         "average": round(statistics.fmean(s), 3),
         "median": round(statistics.median(s), 3),
-        "p25": round(s[max(0, (n // 4) - 1)], 3),
-        "p75": round(s[min(n - 1, (3 * n) // 4)], 3),
+        "p25": round(_percentile(s, 0.25), 3),
+        "p75": round(_percentile(s, 0.75), 3),
     }
 
 
@@ -317,9 +303,9 @@ class _QueryBase(BaseModel):
 class SearchInput(_QueryBase):
     sort: SortOrder = Field(default=SortOrder.RELEVANT, description="Sort order: relevant, newest, cheapest, priciest.")
     category: Optional[str] = Field(default=None, description="Category name or id to scope to (see opensooq_list_categories).", max_length=60)
-    city: Optional[str] = Field(default=None, description="City name or id to scope to (e.g. 'Hawally', 50).", max_length=40)
+    city: Optional[str] = Field(default=None, description="City name or id to scope to (e.g. 'Amman', 59).", max_length=40)
     page: int = Field(default=1, description="1-indexed result page.", ge=1, le=50)
-    limit: Optional[int] = Field(default=None, description="Cap listings returned from the page (1-50).", ge=1, le=50)
+    limit: Optional[int] = Field(default=None, description="Cap listings returned from the page (1-59).", ge=1, le=50)
     min_price: Optional[float] = Field(default=None, description="Client-side: drop listings priced below this.", ge=0)
     max_price: Optional[float] = Field(default=None, description="Client-side: drop listings priced above this.", ge=0)
     has_video: bool = Field(default=False, description="Client-side: keep only listings with a video.")
@@ -327,14 +313,21 @@ class SearchInput(_QueryBase):
     shops_only: bool = Field(default=False, description="Keep only professional 'shop' sellers.")
     verified_only: bool = Field(default=False, description="Keep only verified sellers.")
     min_seller_rating: Optional[float] = Field(default=None, description="Drop sellers rated below this (0-5).", ge=0, le=5)
+    min_seller_reviews: int = Field(default=0, ge=0, le=100000, description="Minimum number of seller reviews.")
     strict_match: bool = Field(default=False, description="Drop listings whose title/description don't contain a query token (suppresses OpenSooq's loosely-related fallback results).")
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="'markdown' or 'json'.")
+
+    @model_validator(mode="after")
+    def validate_price_range(self):
+        if self.min_price is not None and self.max_price is not None and self.min_price > self.max_price:
+            raise ValueError("min_price must not exceed max_price")
+        return self
 
 
 class LatestInput(_QueryBase):
     category: Optional[str] = Field(default=None, description="Optional category name/id to scope to.", max_length=60)
     city: Optional[str] = Field(default=None, description="Optional city name/id to scope to.", max_length=40)
-    limit: int = Field(default=15, description="Number of newest listings to return (1-50).", ge=1, le=50)
+    limit: int = Field(default=15, description="Number of newest listings to return (1-59).", ge=1, le=50)
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="'markdown' or 'json'.")
 
 
@@ -346,7 +339,7 @@ class BrowseCategoryInput(BaseModel):
     city: Optional[str] = Field(default=None, description="Optional city name/id.", max_length=40)
     sort: SortOrder = Field(default=SortOrder.RELEVANT, description="Sort order.")
     page: int = Field(default=1, description="1-indexed page.", ge=1, le=50)
-    limit: Optional[int] = Field(default=None, description="Cap listings returned (1-50).", ge=1, le=50)
+    limit: Optional[int] = Field(default=None, description="Cap listings returned (1-59).", ge=1, le=50)
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="'markdown' or 'json'.")
 
 
@@ -370,7 +363,7 @@ class FindDealsInput(_QueryBase):
     pages: int = Field(default=3, description="Result pages to scan for the price baseline (1-5).", ge=1, le=5)
     discount_pct: float = Field(default=30.0, description="Flag listings at least this %% below the median price (5-90).", ge=5, le=90)
     verified_only: bool = Field(default=False, description="Only surface deals from verified sellers.")
-    limit: int = Field(default=15, description="Max deals to return (1-50).", ge=1, le=50)
+    limit: int = Field(default=15, description="Max deals to return (1-59).", ge=1, le=50)
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="'markdown' or 'json'.")
 
 
@@ -384,7 +377,7 @@ class ComparePricesInput(BaseModel):
 class TopSellersInput(_QueryBase):
     category: Optional[str] = Field(default=None, description="Optional category name/id to scope to.", max_length=60)
     pages: int = Field(default=2, description="Result pages to scan (1-5).", ge=1, le=5)
-    limit: int = Field(default=15, description="Max sellers to return (1-50).", ge=1, le=50)
+    limit: int = Field(default=15, description="Max sellers to return (1-59).", ge=1, le=50)
 
 
 class _IdModel(BaseModel):
@@ -439,6 +432,7 @@ class TrustedSellersInput(_QueryBase):
     category: Optional[str] = Field(default=None, description="Optional category name/id to scope to.", max_length=60)
     pages: int = Field(default=3, description="Result pages to scan (1-5).", ge=1, le=5)
     min_rating: float = Field(default=4.0, description="Minimum average seller rating (0-5).", ge=0, le=5)
+    min_reviews: int = Field(default=5, ge=0, le=100000, description="Minimum seller review count; ratings do not guarantee trustworthiness.")
     require_shop: bool = Field(default=False, description="Require the 'shop' badge in addition to verification.")
 
 
@@ -534,7 +528,7 @@ async def _relevance_gated_fetch(
 
 @mcp.tool(name="opensooq_search_listings", annotations={"title": "Search OpenSooq Listings", **_ANN})
 async def opensooq_search_listings(params: SearchInput) -> str:
-    """Search live OpenSooq (Kuwait) classified listings with sorting and filters.
+    """Search live OpenSooq (Jordan) classified listings with sorting and filters.
 
     The primary discovery tool. Supports server-side sorting (relevant/newest/
     cheapest/priciest), category and city scoping, plus client-side refinements
@@ -554,16 +548,16 @@ async def opensooq_search_listings(params: SearchInput) -> str:
         is_verified, masked phone). On failure, a string starting "Error:".
 
     Examples:
-        - "Cheapest iPhone 15 Pro in Hawally from verified shops" ->
-          query="iphone 15 pro", sort="cheapest", city="Hawally", shops_only=True, verified_only=True
-        - "PS5 listings 80-120 KWD" -> query="ps5", min_price=80, max_price=120
+        - "Cheapest iPhone 15 Pro in Amman from verified shops" ->
+          query="iphone 15 pro", sort="cheapest", city="Amman", shops_only=True, verified_only=True
+        - "PS5 listings 80-120 JOD" -> query="ps5", min_price=80, max_price=120
 
     Note: OpenSooq's server-side price sort ranks its whole loose result set, so
     sorting a specific product by 'cheapest'/'priciest' would otherwise surface
-    unrelated 1-KWD junk while the real product sits pages deep. For those sorts
+    unrelated 1-JOD junk while the real product sits pages deep. For those sorts
     (and whenever strict_match=true) this tool instead scans several pages by
     relevance, keeps genuine matches, drops decoy/outlier prices, and sorts
-    client-side — so 'cheapest <product>' returns the cheapest *real* one.
+    client-side. The ranking covers only the scanned sample, not all listings.
     """
     try:
         cat_id = _resolve_category(params.category)
@@ -597,18 +591,21 @@ async def opensooq_search_listings(params: SearchInput) -> str:
             listings, min_price=params.min_price, max_price=params.max_price,
             has_video=params.has_video, has_images=params.has_images,
             shops_only=params.shops_only, verified_only=params.verified_only,
-            min_seller_rating=params.min_seller_rating,
+            min_seller_rating=params.min_seller_rating, min_seller_reviews=params.min_seller_reviews,
         )
         if gated:
             listings = _sort_listings(listings, params.sort)
-        if params.limit is not None:
-            listings = listings[: params.limit]
-        if not listings:
-            return f"No OpenSooq listings found for '{eff_query}' with those filters."
+        matching_count = len(listings)
+        if gated:
+            page_size = params.limit or 30
+            offset = (params.page - 1) * page_size
+            listings = listings[offset:offset + page_size]
+        elif params.limit is not None:
+            listings = listings[:params.limit]
         payload: Dict[str, Any] = {
             "query": eff_query,
             "sort": params.sort.value,
-            "page": params.page if not gated else 1,
+            "page": params.page,
             "count": len(listings),
             "total": meta.get("count"),
             "listings": listings,
@@ -616,6 +613,9 @@ async def opensooq_search_listings(params: SearchInput) -> str:
         if gated:
             payload["matched"] = len(relevant)
             payload["scanned"] = fetched
+            payload["sample_count"] = matching_count
+            payload["sample_note"] = "Sorted within up to five scanned relevance pages; not a marketplace-wide price ranking."
+            payload["total_note"] = "total is the upstream fuzzy result count before local filters"
         # Warn when even a relevance scan found almost no genuine matches.
         if fetched and len(relevant) / fetched < 0.2:
             payload["relevance_warning"] = (
@@ -625,7 +625,7 @@ async def opensooq_search_listings(params: SearchInput) -> str:
             )
         return _render(payload, params.response_format,
                        f"OpenSooq: '{params.query}' ({params.sort.value})", meta=meta,
-                       note=payload.get("relevance_warning"))
+                       note=" ".join(filter(None, [payload.get("sample_note"), payload.get("relevance_warning")])))
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
 
@@ -646,7 +646,7 @@ async def opensooq_latest_listings(params: LatestInput) -> str:
 
     Examples:
         - "Newest iPhone 15 listings" -> query="iphone 15"
-        - "Latest cars posted in Kuwait City" -> query="", category="Autos", city="Kuwait City"  # note: query required, use a term
+        - "Latest cars posted in Jordan City" -> query="", category="Autos", city="Jordan City"  # note: query required, use a term
     """
     try:
         listings, _ = await oc.search_page(
@@ -757,18 +757,18 @@ async def opensooq_list_categories() -> str:
     """
     cats = [{"id": cid, "name_en": m["en"], "name_ar": m["ar"], "url_name": m["url"]}
             for cid, m in oc.CATEGORIES.items()]
-    return json.dumps({"count": len(cats), "categories": cats}, indent=2, ensure_ascii=False)
+    return json.dumps({"country": COUNTRY, "catalog_source": "bundled snapshot", "verified_at": PROFILE["verified_at"], "count": len(cats), "categories": cats}, indent=2, ensure_ascii=False)
 
 
 @mcp.tool(name="opensooq_list_cities", annotations={"title": "List OpenSooq Cities", **_ANN})
 async def opensooq_list_cities() -> str:
-    """List the Kuwait cities/governorates usable as `city` filters.
+    """List the Jordan cities/governorates usable as `city` filters.
 
     Returns:
         str: JSON `{count, cities:[{id, name}]}`.
     """
-    cities = [{"id": cid, "name": name} for cid, name in oc.CITIES.items()]
-    return json.dumps({"count": len(cities), "cities": cities}, indent=2, ensure_ascii=False)
+    cities = [{"id": cid, "name": m["en"], "name_ar": m["ar"], "url_name": m["url"]} for cid, m in oc.CITY_DETAILS.items()]
+    return json.dumps({"country": COUNTRY, "catalog_source": "bundled snapshot", "verified_at": PROFILE["verified_at"], "count": len(cities), "cities": cities}, indent=2, ensure_ascii=False)
 
 
 @mcp.tool(name="opensooq_browse_category", annotations={"title": "Browse OpenSooq Category", **_ANN})
@@ -788,7 +788,7 @@ async def opensooq_browse_category(params: BrowseCategoryInput) -> str:
 
     Examples:
         - "Browse the cheapest gaming listings" -> category="Gaming & Toys", sort="cheapest"
-        - "Laptops in Hawally" -> category="Computers & Laptops", city="Hawally"
+        - "Laptops in Amman" -> category="Computers & Laptops", city="Amman"
     """
     try:
         cat_id = _resolve_category(params.category)
@@ -855,6 +855,7 @@ async def opensooq_market_summary(params: MarketSummaryInput) -> str:
         return json.dumps({
             "query": eff,
             "currency": priced[0]["currency"],
+            **_sample_metadata(listings, params.pages),
             "total_listings": len(listings),
             "relevant_listings": len(relevant),
             "priced_listings": stats["count"],
@@ -895,16 +896,18 @@ async def opensooq_price_distribution(params: PriceDistributionInput) -> str:
         if not prices:
             return f"No comparable priced OpenSooq listings for '{eff}'."
         lo, hi = prices[0], prices[-1]
-        width = (hi - lo) / params.buckets or 1.0
+        bucket_count = 1 if hi == lo else params.buckets
+        width = (hi - lo) / bucket_count
         buckets = []
-        for i in range(params.buckets):
+        for i in range(bucket_count):
             b_lo = lo + i * width
-            b_hi = hi if i == params.buckets - 1 else lo + (i + 1) * width
-            cnt = sum(1 for p in prices if (b_lo <= p <= b_hi if i == params.buckets - 1 else b_lo <= p < b_hi))
+            b_hi = hi if i == bucket_count - 1 else lo + (i + 1) * width
+            cnt = sum(1 for p in prices if (b_lo <= p <= b_hi if i == bucket_count - 1 else b_lo <= p < b_hi))
             buckets.append({"range_low": round(b_lo, 3), "range_high": round(b_hi, 3), "count": cnt})
         return json.dumps({
             "query": eff,
             "currency": comparable[0]["currency"],
+            **_sample_metadata(listings, params.pages),
             "priced_listings": len(prices), "outliers_excluded": excluded,
             "min": lo, "max": hi, "buckets": buckets,
         }, indent=2, ensure_ascii=False)
@@ -957,6 +960,7 @@ async def opensooq_find_deals(params: FindDealsInput) -> str:
         payload = {
             "query": eff,
             "currency": currency,
+            **_sample_metadata(listings, params.pages),
             "median_price": round(median, 3),
             "threshold_price": round(threshold, 3),
             "outliers_excluded": removed,
@@ -965,7 +969,7 @@ async def opensooq_find_deals(params: FindDealsInput) -> str:
         if params.response_format == ResponseFormat.JSON:
             return json.dumps(payload, indent=2, ensure_ascii=False)
         title = f"Deals for '{params.query}' (≥{params.discount_pct:.0f}% below median {median:,.3f} {currency})"
-        return _format_listings_md(title, deals)
+        return _format_listings_md(title, deals) + "\n\n" + _sample_metadata(listings, params.pages)["sample_note"]
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
 
@@ -999,6 +1003,7 @@ async def opensooq_compare_prices(params: ComparePricesInput) -> str:
             comparisons.append({
                 "query": q,
                 "currency": comparable[0]["currency"],
+                **_sample_metadata(listings, params.pages),
                 "priced_listings": stats["count"], "min": stats["min"], "max": stats["max"],
                 "average": stats["average"], "median": stats["median"],
             })
@@ -1208,13 +1213,15 @@ async def opensooq_find_trusted_sellers(params: TrustedSellersInput) -> str:
             s for s in sellers
             if s["is_verified"]
             and s["rating_avg"] >= params.min_rating
+            and s["rating_count"] >= params.min_reviews
             and (s["is_shop"] if params.require_shop else True)
         ]
         trusted.sort(key=lambda s: (s["rating_avg"], s["listing_count"]), reverse=True)
         return json.dumps({
             "query": _effective_query(params.query, params.query_ar),
-            "criteria": {"min_rating": params.min_rating, "verified": True, "require_shop": params.require_shop},
+            "criteria": {"min_rating": params.min_rating, "min_reviews": params.min_reviews, "verified": True, "require_shop": params.require_shop},
             "seller_count": len(trusted), "sellers": trusted,
+            "note": "Verification and ratings are signals, not a guarantee of seller trustworthiness.",
         }, indent=2, ensure_ascii=False)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

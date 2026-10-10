@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenSooq (Kuwait) API client.
+OpenSooq (Jordan by default) API client.
 
 Pure, dependency-light client for OpenSooq's private `serp/search/v2` endpoint
 and related routes. Contains NO MCP/Pydantic imports so it can be unit-tested on
@@ -11,7 +11,7 @@ OpenSooq publishes no official API, so this replicates the browser handshake:
   1. Register an anonymous device (`/api/register-device`) -> (deviceUUID, t, k).
   2. Mint a short-lived HS256 JWT whose signing key is *derived* from `k` via a
      two-stage HMAC-SHA256 chain (the scheme the web bundle uses).
-  3. Send the cookie + header set the SERP endpoint expects (Kuwait/KWD/desktop).
+  3. Send the cookie + header set the SERP endpoint expects (configured country/currency/desktop).
   4. POST queries and normalize the raw payload into a stable schema.
 
 Faithful port of `backend-worker/src/services/opensooq.ts`. Read-only.
@@ -24,6 +24,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import random
 import re
 import statistics
@@ -31,7 +32,9 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
+
+from market import BASE_URL, COUNTRY, CURRENCY, LANGUAGE, CATEGORIES, CITIES, CITY_DETAILS, normalize_text
 
 import httpx
 
@@ -39,7 +42,6 @@ import httpx
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://kw.opensooq.com"
 REGISTER_URL = f"{BASE_URL}/api/register-device?abBucket=6"
 SEARCH_URL = f"{BASE_URL}/api/serp/search/v2?abBucket=6&Action_screen_name=search"
 IMAGE_HOST = "https://opensooq-images.os-cdn.com"
@@ -52,8 +54,6 @@ USER_AGENT = (
 )
 RELEASE_VERSION = "9.4.02"
 PLATFORM = "desktop"
-COUNTRY = "kw"
-CURRENCY = "KWD"
 
 REQUEST_TIMEOUT_S = 10.0
 JWT_TTL_S = 300
@@ -67,28 +67,6 @@ SORT_CODES: Dict[str, str] = {
     "priciest": "price+",   # price descending
 }
 
-# Top-level category taxonomy (cat1) for the Kuwait site, verified from the
-# `filters.cat_ids.values` payload. id -> {en, ar, url_name}.
-CATEGORIES: Dict[int, Dict[str, str]] = {
-    1749: {"en": "Autos", "ar": "سيارات ومركبات", "url": "cars"},
-    5521: {"en": "Mobile - Tablet", "ar": "موبايل - تابلت", "url": "mobile-phones-tablets"},
-    1873: {"en": "Gaming & Toys", "ar": "ألعاب وألعاب الفيديو", "url": "gaming-consoles"},
-    13737: {"en": "Computers & Laptops", "ar": "لابتوب وكمبيوتر", "url": "computers-and-laptops"},
-    1861: {"en": "Electronics & Appliances", "ar": "أجهزة الكترونية وأجهزة منزلية", "url": "electronics-appliances"},
-    7681: {"en": "Property For Sale", "ar": "عقارات للبيع", "url": "property/property-for-sale"},
-    7999: {"en": "Property For Rent", "ar": "عقارات للايجار", "url": "property/property-for-rent"},
-    1911: {"en": "Home & Garden", "ar": "أثاث - ديكور", "url": "home-garden"},
-}
-
-# Cities (governorates) verified from `filters.city_ids.values`. id -> name.
-CITIES: Dict[int, str] = {
-    49: "Al Ahmadi",
-    46: "Al Jahra",
-    47: "Farwaniya",
-    48: "Hawally",
-    50: "Kuwait City",
-    129: "Mubarak Al-Kabeer",
-}
 
 
 class OpenSooqError(RuntimeError):
@@ -166,14 +144,39 @@ def _build_cookie_header(reg: _Registration, session_id: str) -> str:
         f"ecountry={COUNTRY}",
         f"default_currency={CURRENCY}",
         f"source={PLATFORM}",
-        "NEXT_LOCALE=en",
+        f"NEXT_LOCALE={LANGUAGE}",
         "userABBucket=6",
     ])
 
 
+_request_lock = asyncio.Lock()
+_last_request_at = 0.0
+
+async def _request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Space API calls and retry only throttling/transient server errors, twice."""
+    global _last_request_at
+    for attempt in range(3):
+        async with _request_lock:
+            wait = 0.3 - (time.monotonic() - _last_request_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _last_request_at = time.monotonic()
+            response = await client.request(method, url, **kwargs)
+        if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+            return response
+        try:
+            delay = max(0.3, float(response.headers.get("retry-after", 2 ** attempt)))
+        except ValueError:
+            delay = 2 ** attempt
+        if delay > 10 or not math.isfinite(delay):
+            return response  # respect long Retry-After without blocking a tool indefinitely
+        await asyncio.sleep(delay)
+    raise OpenSooqError("Request retry budget exhausted")
+
+
 async def _register_device(client: httpx.AsyncClient) -> _Registration:
     device_uuid = str(uuid.uuid4())
-    resp = await client.post(
+    resp = await _request(client, "POST",
         REGISTER_URL,
         headers={
             "content-type": "application/json",
@@ -203,9 +206,9 @@ def _search_headers(reg: _Registration, jwt: str, session_id: str) -> Dict[str, 
         "cookie": _build_cookie_header(reg, session_id),
         "content-type": "application/json",
         "accept": "*/*",
-        "accept-language": "en",
+        "accept-language": LANGUAGE,
         "origin": BASE_URL,
-        "referer": f"{BASE_URL}/en",
+        "referer": f"{BASE_URL}/{LANGUAGE}",
         "country": COUNTRY,
         "currency": CURRENCY,
         "x-domain-theme": "opensooq",
@@ -235,6 +238,8 @@ async def raw_search(
     `sort` is a sort code string (see SORT_CODES). `extra` merges into the body.
     Retries once with a fresh device registration on a 401.
     """
+    if not 1 <= page <= 50:
+        raise ValueError("page must be between 1 and 50")
     own_client = client is None
     client = client or httpx.AsyncClient()
     try:
@@ -249,7 +254,7 @@ async def raw_search(
             reg = await _get_registration(client, force=(attempt == 1))
             jwt = _generate_jwt(reg)
             session_id = f"{uuid.uuid4().hex[:12]}-{uuid.uuid4().hex[:12]}-{uuid.uuid4()}"
-            resp = await client.post(
+            resp = await _request(client, "POST",
                 SEARCH_URL,
                 headers=_search_headers(reg, jwt, session_id),
                 json=body,
@@ -258,7 +263,10 @@ async def raw_search(
             if resp.status_code == 401 and attempt == 0:
                 continue  # stale registration; retry once with a fresh device
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("listings"), dict):
+                raise OpenSooqError("Unexpected search response; OpenSooq API schema may have changed")
+            return data
         raise OpenSooqError("Authentication failed after retry (401).")
     finally:
         if own_client:
@@ -284,7 +292,7 @@ async def fetch_listing_by_id(
         return None
     data = await raw_search("", extra={"post_ids": [pid]}, client=client)
     items = extract_items(data)
-    return normalize_item(items[0]) if items else None
+    return next((normalize_item(it) for it in items if str(it.get("id")) == str(pid)), None)
 
 
 async def fetch_member_listings(
@@ -302,7 +310,8 @@ async def fetch_member_listings(
     except (TypeError, ValueError):
         return [], {}
     data = await raw_search("", page=page, sort=sort, extra={"member_ids": [mid]}, client=client)
-    return [normalize_item(it) for it in extract_items(data)], extract_meta(data)
+    return [normalize_item(it) for it in extract_items(data)
+            if str(it.get("member_id")) == str(mid)], extract_meta(data)
 
 
 async def fetch_all_member_listings(
@@ -414,12 +423,23 @@ async def fetch_listing_page_details(
     """
     if not post_url:
         return {}
-    url = post_url if post_url.startswith("http") else f"{BASE_URL}{post_url}"
+    url = urljoin(BASE_URL, post_url)
+    if urlparse(url).scheme != "https" or urlparse(url).netloc != urlparse(BASE_URL).netloc:
+        return {}
     own = client is None
-    client = client or httpx.AsyncClient(follow_redirects=True)
+    client = client or httpx.AsyncClient(follow_redirects=False)
     try:
-        resp = await client.get(url, headers={"user-agent": USER_AGENT, "accept-language": "en"},
-                                timeout=REQUEST_TIMEOUT_S, follow_redirects=True)
+        for hop in range(4):
+            resp = await _request(client, "GET", url,
+                                  headers={"user-agent": USER_AGENT, "accept-language": LANGUAGE},
+                                  timeout=REQUEST_TIMEOUT_S, follow_redirects=False)
+            if resp.status_code not in {301, 302, 303, 307, 308}:
+                break
+            target = urljoin(url, resp.headers.get("location", ""))
+            parsed = urlparse(target)
+            if parsed.scheme != "https" or parsed.netloc != urlparse(BASE_URL).netloc:
+                return {}
+            url = target
         if resp.status_code != 200:
             return {}
         big = _decode_flight(resp.text)
@@ -442,13 +462,16 @@ async def fetch_listing_page_details(
 # ---------------------------------------------------------------------------
 
 def parse_price(price_amount: Any) -> float:
-    if not price_amount:
+    """Parse JOD decimals, Arabic digits and thousands separators; reject invalid prices."""
+    if price_amount is None:
         return 0.0
-    match = re.search(r"[\d,.]+", str(price_amount))
+    text = normalize_text(str(price_amount)).replace("٬", "").replace("٫", ".")
+    match = re.search(r"-?\d[\d,.]*", text)
     if not match:
         return 0.0
     try:
-        return float(match.group(0).replace(",", ""))
+        value = float(match.group(0).replace(",", ""))
+        return value if math.isfinite(value) and value >= 0 else 0.0
     except ValueError:
         return 0.0
 
@@ -641,7 +664,7 @@ MODEL_MODIFIERS: Dict[str, set] = {
 
 def query_tokens(query: str) -> List[str]:
     """Significant lowercase tokens for relevance matching (drops stopwords)."""
-    toks = re.findall(r"[\w؀-ۿ]+", query.lower())
+    toks = re.findall(r"[\w؀-ۿ]+", normalize_text(query))
     return [t for t in toks if t not in STOPWORDS and (len(t) >= 3 or t.isdigit())]
 
 
@@ -661,7 +684,8 @@ def comparable_listings(
     same product. Falls back to all priced listings when the sample is too small
     (<4) to estimate a reliable median.
     """
-    priced = [l for l in listings if l["price"] > 0]
+    priced = [l for l in listings if l["price"] > 0 and math.isfinite(l["price"])
+              and l.get("currency", CURRENCY) == CURRENCY]
     if len(priced) < 4:
         med = statistics.median([l["price"] for l in priced]) if priced else 0.0
         return priced, med, 0
@@ -687,12 +711,12 @@ def relevant_listings(query: str, listings: List[Dict[str, Any]]) -> List[Dict[s
         else:
             words.append(t)
     num_pats = [re.compile(rf"(?<!\d){re.escape(n)}(?!\d)") for n in numbers]
-    q_low = query.lower()
-    required_modifiers = [forms for forms in MODEL_MODIFIERS.values()
-                          if any(f in q_low for f in forms)]
+    q_low = normalize_text(query)
+    required_modifiers = [{normalize_text(f) for f in forms} for forms in MODEL_MODIFIERS.values()
+                          if any(normalize_text(f) in query_tokens(q_low) for f in forms)]
     out = []
     for l in listings:
-        hay = f"{l.get('title') or ''} {l.get('description') or ''}".lower()
+        hay = normalize_text(f"{l.get('title') or ''} {l.get('description') or ''}")
         if any(not any(f in hay for f in forms) for forms in required_modifiers):
             continue
         if num_pats:
@@ -749,13 +773,21 @@ async def search_multi_page(
     sort: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Search across multiple pages, stopping early when a page is empty."""
+    if not 1 <= pages <= 5:
+        raise ValueError("pages must be between 1 and 5")
     out: List[Dict[str, Any]] = []
+    seen = set()
     async with httpx.AsyncClient() as client:
         for page in range(1, pages + 1):
-            items, _ = await search_page(
+            items, meta = await search_page(
                 query, page=page, cat_id=cat_id, city_id=city_id, sort=sort, client=client
             )
             if not items:
                 break
-            out.extend(items)
+            for item in items:
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    out.append(item)
+            if meta.get("pages") and page >= meta["pages"]:
+                break
     return out
