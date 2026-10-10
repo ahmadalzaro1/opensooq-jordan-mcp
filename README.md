@@ -47,7 +47,14 @@ Country accepts `jo` or `kw`; locale accepts `en` or `ar`. Configuration is read
 startup. Queries and city/category names accept Arabic or English independently
 of locale. Arabic diacritics, common letter variants and Arabic/Persian digits are
 normalized. The alias dictionary covers common products; it does not translate
-arbitrary English queries into Arabic. `query_ar` overrides `query` when supplied.
+arbitrary English queries into Arabic. Supplying `query_ar` searches both terms,
+merges by listing ID, and records `source_queries`. Supply equivalent terms.
+Ordinary search/newest makes one page call per language; strict and price-ranked
+search shares a maximum of five page calls across both. Price/seller tools share
+their `pages` budget, with a minimum of two calls when two terms are supplied.
+`search.query_totals` keeps overlapping fuzzy counts separate; combined `total`
+is null rather than summing them. `search.partial` and `query_errors` report a
+failed language. Matching results are sorted within the fetched sample.
 
 ## Tools
 
@@ -108,8 +115,8 @@ prices and Arabic separators are parsed; another currency is excluded rather
 than mixed into calculations. Unknown dates stay null rather than appearing new.
 
 Summaries report aggregate statistics **and separate cohorts** by recognized
-model, tier, capacity and condition. Recognized Prius/Ioniq vehicle years are also
-separated. Quartiles use linear interpolation. Broad outlier filtering is applied
+model, tier, capacity and condition, or domain-specific car/property fields.
+Quartiles use linear interpolation. Broad outlier filtering is applied
 within cohorts, rather than excluding new-device prices against a used-device
 median. Aggregated medians can still mix specifications: inspect the cohorts.
 
@@ -118,6 +125,14 @@ includes its baseline size and median. The default `min_sample=5` requires five
 priced listings in that cohort. Cohorts containing unknown specifications do not
 produce deals; the tool returns their unusable baseline explicitly. No result is
 presented as a guaranteed bargain, sale price or formal valuation.
+Partial bilingual samples also abstain from deal generation. `warnings` makes
+mixed cohorts, incomplete comparison specifications and partial samples explicit.
+
+`opensooq_market_summary` accepts `group_by`: make, model, year, fuel,
+transmission, bedrooms, rental_period, property_type, furnished, city or
+neighborhood. Groups include their sample count, median/quartiles, low-sample
+warning and separate specification cohorts. Group averages can still mix
+specifications; inspect their cohorts rather than treating them as valuations.
 
 Cheapest/priciest search scans up to five relevance pages and sorts locally. Its
 pagination operates on that sample. `total` is the upstream fuzzy count **before
@@ -125,6 +140,60 @@ local filtering**, while `sample_count` is the filtered sample size. Searching
 cannot guarantee the cheapest listing across the entire marketplace. Price-ranked
 search and threshold watches do not discard a match simply because it is cheap;
 offer flags and identity checks are used instead of a global median cutoff.
+
+## Car and property specifications
+
+Listings include `specifications`: domain, normalized fields, raw field evidence,
+conflicts and warnings. Nested `highlightsObject` attributes retain their semantic
+keys and display values. Compact fields with explicit units are also retained.
+Detail lookup merges page attributes with API attributes and recalculates both
+specifications and quality; conflicting sources remain visible.
+
+- Cars: make/model/trim, year, mileage range in km, fuel, transmission, body type,
+  vehicle condition and engine-size text when present. Mileage ranges remain
+  ranges; miles with explicit units are converted. Structured year/title conflicts
+  set the year to null and flag the offer. Bare ambiguous mileage stays unknown.
+- Property: transaction/type, bedrooms, bathrooms, area in m², furnishing, floor,
+  location, advertised rental period and explicitly stated price billing period.
+  Bare area numbers do not establish units. Ground floor and studio are zero;
+  missing values remain null. No monthly/annual price conversion is assumed.
+
+Search and price tools accept `year`, `max_mileage_km`, `bedrooms`, `min_area_m2`,
+`max_area_m2`, `rental_period` and `neighborhood`. These are **local filters** over
+the bounded sample. Unknown/conflicting values do not satisfy specific filters.
+Mileage's entire known range must be within the maximum. Neighborhood requires
+the exact normalized label returned by the source; it does not translate aliases.
+
+Vehicle cohorts separate make/model/trim/year/fuel/transmission/body/engine/condition
+and 50,000-km bands. A mileage range crossing a band stays unknown. Property
+cohorts separate transaction/type/location/rooms/furnishing/floor and 25-m² bands.
+Missing required fields or conflicting evidence make a deal baseline unusable.
+Rental cohorts additionally separate advertised rental period and **price billing
+period**: a yearly contract term alone does not establish a yearly asking price.
+Rental deals abstain when the price period is unconfirmed. These coarse bands
+are comparison heuristics, not a validated automotive or property valuation model.
+
+## Diagnostics and exports
+
+```sh
+uv run --locked diagnose.py          # local config/counters; no requests
+uv run --locked diagnose.py --probe  # one paced search-page probe; bounded retries
+uv run --locked export.py --query 'toyota prius' --query-ar 'تويوتا بريوس' \
+  --city Amman --category 1775 --year 2020 --output prius.csv
+uv run --locked export.py --query 'شقة للايجار' --category 8035 \
+  --bedrooms 3 --format json --output apartments.json
+```
+
+Diagnostics return status, latency and error counters without tokens, URLs or
+device IDs. Counters belong to the current process; a fresh CLI has no history of
+the running MCP process. A probe does not validate every upstream endpoint.
+
+Exports use the same strict, capped search (at most 50 returned listings), retain
+currency, observed-at time, raw evidence, risk flags, source queries, sample note
+and partial-result status. CSV uses UTF-8 with BOM and neutralizes formula-leading
+text before spreadsheet import. JSON retains the complete sample metadata.
+Existing files are never overwritten. `observed_at` is our fetch time, not the
+listing's publication date. No database, dashboard or scheduler is installed.
 
 ## Watch prices
 
@@ -143,6 +212,10 @@ files migrate by establishing a baseline without repeating old alerts.
 State filenames include the market and a hash of query/filter settings. Only
 qualifying listings are tracked, not complete marketplace price history. A listing
 missing from the next sample has not necessarily been sold or removed.
+With `--query-ar`, both supplied terms are searched under one shared budget.
+A partially failed bilingual poll preserves state and emits no alerts. The default
+state filename for a bilingual watch now includes both terms; use `--state` to
+retain an explicitly chosen existing state file across this change.
 
 Optional delivery:
 

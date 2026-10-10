@@ -21,8 +21,9 @@ from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import opensooq_client as oc
-from listing_quality import cohort_key, filter_quality
+from listing_quality import cohort_key, filter_quality, quality
 from market import COUNTRY, CURRENCY, PROFILE, normalize_text, resolve_category, resolve_city
+from specifications import specifications
 
 mcp = FastMCP("opensooq_jordan_mcp")
 _ANN = {
@@ -64,7 +65,8 @@ class _QueryBase(BaseModel):
     )
     query_ar: Optional[str] = Field(
         default=None,
-        description="Optional Arabic term; overrides `query` for the API call (better recall).",
+        description="Optional Arabic equivalent; search both languages under one shared request budget.",
+        min_length=1,
         max_length=200,
     )
 
@@ -76,7 +78,55 @@ class _QueryBase(BaseModel):
         return v.strip()
 
 
-class SearchInput(_QueryBase):
+class DomainFilters(BaseModel):
+    year: Optional[int] = Field(
+        default=None,
+        ge=1900,
+        le=2100,
+        description="Exact structured vehicle year; conflicting/unknown years are excluded.",
+    )
+    max_mileage_km: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=10000000,
+        description="Vehicle mileage upper bound; the entire known mileage range must fit.",
+    )
+    bedrooms: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Exact known property bedroom count; studio is zero.",
+    )
+    min_area_m2: Optional[float] = Field(
+        default=None, gt=0, le=10000000, description="Minimum known property area in square metres."
+    )
+    max_area_m2: Optional[float] = Field(
+        default=None, gt=0, le=10000000, description="Maximum known property area in square metres."
+    )
+    rental_period: Optional[str] = Field(
+        default=None,
+        pattern="^(daily|weekly|monthly|yearly)$",
+        description="Exact explicit rental period; unknowns excluded, no conversion assumed.",
+    )
+    neighborhood: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Client-side exact normalized neighborhood label; use the returned Arabic/English label.",
+    )
+
+    @model_validator(mode="after")
+    def validate_area_range(self):
+        if (
+            self.min_area_m2 is not None
+            and self.max_area_m2 is not None
+            and self.min_area_m2 > self.max_area_m2
+        ):
+            raise ValueError("min_area_m2 must not exceed max_area_m2")
+        return self
+
+
+class SearchInput(_QueryBase, DomainFilters):
     sort: SortOrder = Field(
         default=SortOrder.RELEVANT, description="Sort order: relevant, newest, cheapest, priciest."
     )
@@ -187,7 +237,7 @@ class CategoryBreakdownInput(_QueryBase):
     pass
 
 
-class _PriceBase(_QueryBase):
+class _PriceBase(_QueryBase, DomainFilters):
     category: Optional[str] = Field(default=None, max_length=60)
     city: Optional[str] = Field(default=None, max_length=40)
     pages: int = Field(default=2, ge=1, le=5)
@@ -206,7 +256,11 @@ class _PriceBase(_QueryBase):
 
 
 class MarketSummaryInput(_PriceBase):
-    pass
+    group_by: Optional[str] = Field(
+        default=None,
+        pattern="^(make|model|year|fuel|transmission|bedrooms|rental_period|property_type|furnished|city|neighborhood)$",
+        description="Optional attribute/location pivot; each group retains specification cohorts and sample warnings.",
+    )
 
 
 class PriceDistributionInput(_PriceBase):
@@ -393,6 +447,73 @@ def _effective_query(query, query_ar):
     return query_ar or query
 
 
+def _queries(params):
+    return list(dict.fromkeys(q for q in (params.query, params.query_ar) if q))
+
+
+def _query_matches(params, raw):
+    matched = {x["id"] for q in _queries(params) for x in _relevant_listings(q, raw)}
+    return [x for x in raw if x["id"] in matched]
+
+
+async def _fetch_sample(params):
+    terms = _queries(params)
+    if len(terms) > 1:
+        return await oc.search_bilingual(
+            terms,
+            budget=max(2, params.pages),
+            cat_id=_resolve_category(params.category),
+            city_id=_resolve_city(params.city),
+        )
+    raw = await oc.search_multi_page(
+        terms[0],
+        pages=params.pages,
+        cat_id=_resolve_category(params.category),
+        city_id=_resolve_city(params.city),
+    )
+    return raw, {"queries": terms, "request_budget": params.pages, "partial": False}
+
+
+def _filter_domains(listings, params):
+    kept, rejected = [], defaultdict(int)
+    for listing in listings:
+        spec = listing.get("specifications") or specifications(listing)
+        fields = spec["fields"]
+        failures = []
+        for name in ("year", "bedrooms", "rental_period"):
+            desired = getattr(params, name, None)
+            if desired is not None and (
+                fields.get(name) != desired
+                or name in spec["conflicts"]
+                or f"{name}_title_mismatch" in spec["conflicts"]
+            ):
+                failures.append(name)
+        mileage = getattr(params, "max_mileage_km", None)
+        if mileage is not None and (
+            not fields.get("mileage_km") or fields["mileage_km"]["max"] > mileage
+        ):
+            failures.append("mileage")
+        area = fields.get("area_m2")
+        for name, invalid in (
+            ("min_area_m2", lambda v: area < v),
+            ("max_area_m2", lambda v: area > v),
+        ):
+            bound = getattr(params, name, None)
+            if bound is not None and (area is None or invalid(bound)):
+                failures.append(name)
+        neighborhood = getattr(params, "neighborhood", None)
+        if neighborhood is not None and normalize_text(
+            str((listing.get("location") or {}).get("neighborhood") or "")
+        ) != normalize_text(neighborhood):
+            failures.append("neighborhood")
+        if failures:
+            for failure in failures:
+                rejected[failure + "_mismatch_or_unknown"] += 1
+        else:
+            kept.append(listing)
+    return kept, dict(rejected)
+
+
 def _sort_code(order):
     return oc.SORT_CODES[order.value]
 
@@ -432,7 +553,7 @@ def _sample_metadata(listings, pages):
     }
 
 
-def _cohorts(listings, min_sample=5):
+def _cohorts(listings, min_sample=5, partial=False):
     grouped = defaultdict(list)
     for listing in listings:
         grouped[cohort_key(listing)].append(listing)
@@ -446,11 +567,36 @@ def _cohorts(listings, min_sample=5):
                 "listings": len(group),
                 "outliers_excluded": outliers,
                 **stats,
-                "baseline_usable": stats["count"] >= min_sample and "unknown" not in key,
+                "baseline_usable": stats["count"] >= min_sample
+                and "unknown" not in key
+                and not partial,
                 "specifications_incomplete": "unknown" in key,
             }
         )
     return rows
+
+
+def _attribute_groups(listings, field, min_sample, partial=False):
+    groups = defaultdict(list)
+    for listing in listings:
+        spec = listing.get("specifications") or specifications(listing)
+        value = (
+            (listing.get("location") or {}).get(field)
+            if field in {"city", "neighborhood"}
+            else spec["fields"].get(field)
+        )
+        key = normalize_text(str(value)) if value is not None else "unknown"
+        groups[key].append(listing)
+    return [
+        {
+            "value": key,
+            **_price_stats([x["price"] for x in group]),
+            "low_sample": len(group) < min_sample,
+            "cohorts": _cohorts(group, min_sample, partial),
+            "note": "Group aggregates can mix specifications; compare the included cohorts.",
+        }
+        for key, group in sorted(groups.items())
+    ]
 
 
 def _format_listings_md(title, listings, meta=None):
@@ -568,19 +714,16 @@ async def _relevance_gated_fetch(query, cat_id, city_id):
 
 async def _price_sample(params):
     query = _effective_query(params.query, params.query_ar)
-    raw = await oc.search_multi_page(
-        query,
-        pages=params.pages,
-        cat_id=_resolve_category(params.category),
-        city_id=_resolve_city(params.city),
-    )
-    relevant = _relevant_listings(query, raw)
+    raw, search_meta = await _fetch_sample(params)
+    relevant = _query_matches(params, raw)
     selected, reasons = filter_quality(
         relevant,
         condition=params.condition,
         storage_gb=params.storage_gb,
         include_risky=params.include_risky,
     )
+    selected, domain_reasons = _filter_domains(selected, params)
+    reasons.update(domain_reasons)
     groups = defaultdict(list)
     for listing in selected:
         groups[cohort_key(listing)].append(listing)
@@ -591,13 +734,26 @@ async def _price_sample(params):
         comparable.extend(kept)
         excluded += removed
     median = statistics.median(listing["price"] for listing in comparable) if comparable else 0
+    keys = {cohort_key(item) for item in comparable}
+    warnings = []
+    if len(keys) > 1:
+        warnings.append("aggregate_mixes_specification_cohorts")
+    if any("unknown" in key for key in keys):
+        warnings.append("incomplete_comparison_specifications")
+    if search_meta.get("partial"):
+        warnings.append("partial_bilingual_sample")
     return (
         query,
         raw,
         relevant,
         comparable,
         median,
-        {"quality_rejections": reasons, "outliers_excluded": excluded},
+        {
+            "quality_rejections": reasons,
+            "outliers_excluded": excluded,
+            "search": search_meta,
+            "warnings": warnings,
+        },
     )
 
 
@@ -613,7 +769,16 @@ async def opensooq_search_listings(params: SearchInput) -> str:
     """
     query = _effective_query(params.query, params.query_ar)
     gated = params.strict_match or params.sort in {SortOrder.CHEAPEST, SortOrder.PRICIEST}
-    if gated:
+    if len(_queries(params)) > 1:
+        raw, meta = await oc.search_bilingual(
+            _queries(params),
+            budget=5 if gated else 2,
+            page=1 if gated else params.page,
+            cat_id=_resolve_category(params.category),
+            city_id=_resolve_city(params.city),
+            sort=oc.SORT_CODES["relevant"] if gated else _sort_code(params.sort),
+        )
+    elif gated:
         raw, meta = await _relevance_gated_fetch(
             query, _resolve_category(params.category), _resolve_city(params.city)
         )
@@ -625,13 +790,15 @@ async def opensooq_search_listings(params: SearchInput) -> str:
             city_id=_resolve_city(params.city),
             sort=_sort_code(params.sort),
         )
-    relevant = _relevant_listings(query, raw)
+    relevant = _query_matches(params, raw)
     listings, reasons = filter_quality(
         relevant,
         condition=params.condition,
         storage_gb=params.storage_gb,
         include_risky=params.include_risky,
     )
+    listings, domain_reasons = _filter_domains(listings, params)
+    reasons.update(domain_reasons)
     listings = _apply_post_filters(
         listings,
         min_price=params.min_price,
@@ -643,7 +810,7 @@ async def opensooq_search_listings(params: SearchInput) -> str:
         min_seller_rating=params.min_seller_rating,
         min_seller_reviews=params.min_seller_reviews,
     )
-    if gated:
+    if gated or len(_queries(params)) > 1:
         listings = _sort_listings(listings, params.sort)
     matching_count = len(listings)
     size = params.limit or 30
@@ -652,7 +819,7 @@ async def opensooq_search_listings(params: SearchInput) -> str:
     note = (
         "Sorted within up to five relevance pages, not a marketplace-wide ranking."
         if gated
-        else "One upstream page, with local product and offer filtering."
+        else "One upstream page per supplied language, with local product and offer filtering."
     )
     payload = {
         "query": query,
@@ -663,7 +830,12 @@ async def opensooq_search_listings(params: SearchInput) -> str:
         "page_size": size,
         "count": len(listings),
         "total": meta.get("count"),
-        "total_note": "Upstream fuzzy count before local filters.",
+        "total_note": "Per-language fuzzy counts overlap; combined total is unknown."
+        if len(_queries(params)) > 1
+        else "Upstream fuzzy count before local filters.",
+        "search": meta
+        if len(_queries(params)) > 1
+        else {"queries": _queries(params), "partial": False},
         "matched": len(relevant),
         "scanned": len(raw),
         "sample_count": matching_count,
@@ -679,15 +851,30 @@ async def opensooq_search_listings(params: SearchInput) -> str:
 async def opensooq_latest_listings(params: LatestInput) -> str:
     """Get newest-first product matches from one upstream page; no matches returns an empty array."""
     query = _effective_query(params.query, params.query_ar)
-    raw, meta = await oc.search_page(
-        query,
-        cat_id=_resolve_category(params.category),
-        city_id=_resolve_city(params.city),
-        sort=oc.SORT_CODES["newest"],
-    )
-    listings = _relevant_listings(query, raw)[: params.limit]
+    if len(_queries(params)) > 1:
+        raw, meta = await oc.search_bilingual(
+            _queries(params),
+            budget=2,
+            cat_id=_resolve_category(params.category),
+            city_id=_resolve_city(params.city),
+            sort=oc.SORT_CODES["newest"],
+        )
+    else:
+        raw, meta = await oc.search_page(
+            query,
+            cat_id=_resolve_category(params.category),
+            city_id=_resolve_city(params.city),
+            sort=oc.SORT_CODES["newest"],
+        )
+    listings = _sort_listings(_query_matches(params, raw), SortOrder.NEWEST)[: params.limit]
     return _render(
-        {"query": query, "country": COUNTRY, "count": len(listings), "listings": listings},
+        {
+            "query": query,
+            "country": COUNTRY,
+            "count": len(listings),
+            "search": meta,
+            "listings": listings,
+        },
         params.response_format,
         f"Newest: {query}",
         meta=meta,
@@ -699,6 +886,34 @@ async def opensooq_latest_listings(params: LatestInput) -> str:
 async def opensooq_category_breakdown(params: CategoryBreakdownInput) -> str:
     """Return upstream category facets and fuzzy counts for an Arabic/English query."""
     query = _effective_query(params.query, params.query_ar)
+    if len(_queries(params)) > 1:
+        responses, errors = [], []
+        for term in _queries(params):
+            try:
+                data = await oc.raw_search(term)
+                responses.append(
+                    {
+                        "query": term,
+                        "total": oc.extract_total(data),
+                        "categories": oc.extract_category_facets(data),
+                    }
+                )
+            except (httpx.HTTPError, oc.OpenSooqError) as error:
+                errors.append({"query": term, "error_type": type(error).__name__})
+        if not responses:
+            raise oc.OpenSooqError("All category queries failed")
+        return _json(
+            {
+                "query": query,
+                "country": COUNTRY,
+                "total": None,
+                "categories": responses[0]["categories"],
+                "categories_note": "Legacy categories show the first successful query; per_query retains both. Counts overlap and are not summed.",
+                "per_query": responses,
+                "partial": bool(errors),
+                "query_errors": errors,
+            }
+        )
     data = await oc.raw_search(query)
     return _json(
         {
@@ -738,6 +953,15 @@ async def opensooq_get_listing(params: GetListingInput) -> str:
         details = {**details, "seller_profile": None}
     if details.get("full_description"):
         item = {**item, "description": details["full_description"]}
+    if details.get("attributes"):
+        item = {
+            **item,
+            "attributes": [
+                *item.get("attributes", []),
+                *[{**row, "source": "detail_page"} for row in details["attributes"]],
+            ],
+        }
+    item = {**item, "specifications": specifications(item), "quality": quality(item)}
     if params.response_format == ResponseFormat.JSON:
         return _json({"found": True, "listing": item, "details": details})
     markdown = _format_listings_md(f"Listing {item['id']}", [item])
@@ -849,7 +1073,18 @@ async def opensooq_market_summary(params: MarketSummaryInput) -> str:
             **exclusions,
             **{k: v for k, v in stats.items() if k != "count"},
             "low_sample": len(priced) < params.min_sample,
-            "cohorts": _cohorts(priced, params.min_sample),
+            "cohorts": _cohorts(
+                priced, params.min_sample, exclusions["search"].get("partial", False)
+            ),
+            "group_by": params.group_by,
+            "groups": _attribute_groups(
+                priced,
+                params.group_by,
+                params.min_sample,
+                exclusions["search"].get("partial", False),
+            )
+            if params.group_by
+            else [],
             "cheapest_url": sorted_prices[0]["url"] if sorted_prices else None,
             "priciest_url": sorted_prices[-1]["url"] if sorted_prices else None,
         }
@@ -882,7 +1117,9 @@ async def opensooq_price_distribution(params: PriceDistributionInput) -> str:
             "min": prices[0] if prices else None,
             "max": prices[-1] if prices else None,
             "buckets": buckets,
-            "cohorts": _cohorts(priced, params.min_sample),
+            "cohorts": _cohorts(
+                priced, params.min_sample, exclusions["search"].get("partial", False)
+            ),
         }
     )
 
@@ -904,7 +1141,11 @@ async def opensooq_find_deals(params: FindDealsInput) -> str:
     baselines = []
     for key, group in sorted(groups.items()):
         comparable, median, removed = _comparable_listings(group)
-        usable = len(comparable) >= params.min_sample and "unknown" not in key
+        usable = (
+            len(comparable) >= params.min_sample
+            and "unknown" not in key
+            and not exclusions["search"].get("partial", False)
+        )
         baselines.append(
             {
                 "cohort": key,
@@ -1016,17 +1257,13 @@ def _aggregate_sellers(listings):
 async def opensooq_top_sellers(params: TopSellersInput) -> str:
     """Rank sellers by matched listing volume in a bounded search sample, then rating. This is not total seller volume."""
     query = _effective_query(params.query, params.query_ar)
-    raw = await oc.search_multi_page(
-        query,
-        pages=params.pages,
-        cat_id=_resolve_category(params.category),
-        city_id=_resolve_city(params.city),
-    )
-    relevant = _relevant_listings(query, raw)
+    raw, search_meta = await _fetch_sample(params)
+    relevant = _query_matches(params, raw)
     sellers = _aggregate_sellers(relevant)
     return _json(
         {
             "query": query,
+            "search": search_meta,
             **_sample_metadata(raw, params.pages),
             "listings_seen": len(relevant),
             "unique_sellers": len(sellers),
@@ -1139,13 +1376,8 @@ async def opensooq_seller_profile(params: SellerProfileInput) -> str:
 async def opensooq_find_trusted_sellers(params: TrustedSellersInput) -> str:
     """Filter verified sellers by minimum rating/review count and optional shop badge. Signals do not guarantee trustworthiness."""
     query = _effective_query(params.query, params.query_ar)
-    raw = await oc.search_multi_page(
-        query,
-        pages=params.pages,
-        cat_id=_resolve_category(params.category),
-        city_id=_resolve_city(params.city),
-    )
-    sellers = _aggregate_sellers(_relevant_listings(query, raw))
+    raw, search_meta = await _fetch_sample(params)
+    sellers = _aggregate_sellers(_query_matches(params, raw))
     filtered = [
         seller
         for seller in sellers
@@ -1158,6 +1390,7 @@ async def opensooq_find_trusted_sellers(params: TrustedSellersInput) -> str:
     return _json(
         {
             "query": query,
+            "search": search_meta,
             "country": COUNTRY,
             "criteria": {
                 "min_rating": params.min_rating,

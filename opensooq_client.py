@@ -50,6 +50,7 @@ from market import CATEGORIES as CATEGORIES
 from market import CITIES as CITIES
 from market import CITY_DETAILS as CITY_DETAILS
 from page_parser import extract_details
+from specifications import specifications
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -170,6 +171,18 @@ def _build_cookie_header(reg: _Registration, session_id: str) -> str:
 
 _request_lock = asyncio.Lock()
 _last_request_at = 0.0
+_telemetry = {
+    "requests": 0,
+    "errors": 0,
+    "last_status": None,
+    "last_latency_ms": None,
+    "last_error_type": None,
+}
+
+
+def request_status():
+    """Local counters only, without URLs, tokens, device IDs, or network activity."""
+    return dict(_telemetry)
 
 
 async def _request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
@@ -181,12 +194,29 @@ async def _request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -
             if wait > 0:
                 await asyncio.sleep(wait)
             _last_request_at = time.monotonic()
+            _telemetry["requests"] += 1
             try:
                 response = await client.request(method, url, **kwargs)
-            except (httpx.TimeoutException, httpx.ConnectError):
-                if attempt == 2:
+            except httpx.HTTPError as error:
+                _telemetry.update(
+                    last_status=None,
+                    last_latency_ms=round((time.monotonic() - _last_request_at) * 1000),
+                    last_error_type=type(error).__name__,
+                )
+                _telemetry["errors"] += 1
+                if attempt == 2 or not isinstance(
+                    error, (httpx.TimeoutException, httpx.ConnectError)
+                ):
                     raise
                 response = None
+            else:
+                _telemetry.update(
+                    last_status=response.status_code,
+                    last_latency_ms=round((time.monotonic() - _last_request_at) * 1000),
+                    last_error_type="HTTPError" if response.is_error else None,
+                )
+                if response.is_error:
+                    _telemetry["errors"] += 1
         if response is None:
             await asyncio.sleep(0.3 * (2**attempt))
             continue
@@ -592,17 +622,43 @@ def _text(value: Any) -> Optional[str]:
 
 def _attributes(item: Dict[str, Any]) -> List[Dict[str, str]]:
     rows = []
+    seen = set()
+
+    def add(label, value, source, display=None):
+        if (
+            not isinstance(label, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (str, int, float))
+        ):
+            return
+        key = (label, str(value))
+        if key not in seen:
+            seen.add(key)
+            row = {"label": label, "value": str(value), "source": source}
+            if isinstance(display, str):
+                row["display_value"] = display
+            rows.append(row)
+
     for key in ("highlights", "highlightsObject", "ai_tags"):
         values = item.get(key)
         if isinstance(values, dict):
-            values = list(values.values())
+            for label, group in values.items():
+                group = group if isinstance(group, list) else [group]
+                for row in group:
+                    if isinstance(row, dict):
+                        add(label, row.get("value"), key, row.get("label"))
+                    else:
+                        add(label, row, key)
         if isinstance(values, list):
             for row in values:
                 if isinstance(row, dict):
                     label = row.get("label") or row.get("name") or row.get("key")
-                    value = row.get("value")
-                    if isinstance(label, str) and isinstance(value, (str, int, float)):
-                        rows.append({"label": label, "value": str(value)})
+                    add(label, row.get("value"), key)
+    compact = item.get("cps")
+    for value in compact if isinstance(compact, list) else []:
+        if isinstance(value, str) and ":" in value:
+            label, content = value.split(":", 1)
+            add(label.strip(), content.strip(), "cps")
     return rows
 
 
@@ -670,6 +726,7 @@ def normalize_item(item: Dict[str, Any], fallback_title: str = "") -> Dict[str, 
         "seller": build_seller(item),
         "url": _build_listing_url(item),
     }
+    result["specifications"] = specifications(result)
     result["quality"] = quality(result)
     return result
 
@@ -714,6 +771,82 @@ def extract_category_facets(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 }
             )
     return out
+
+
+async def search_bilingual(
+    queries: List[str],
+    *,
+    budget: int = 5,
+    page: int = 1,
+    cat_id: Optional[int] = None,
+    city_id: Optional[int] = None,
+    sort: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Round-robin up to two queries under one shared page-request budget.
+
+    Each language has its own page cursor. Totals cannot be summed because their
+    result sets overlap. A failed language is reported; all-language failure raises.
+    """
+    terms = list(dict.fromkeys(q.strip() for q in queries if q.strip()))
+    if not 1 <= len(terms) <= 2 or not len(terms) <= budget <= 5 or not 1 <= page <= 50:
+        raise ValueError(
+            "Use 1-2 queries, a shared budget between query count and 5, and page 1-50"
+        )
+    cursors = {q: page for q in terms}
+    query_seen = {q: set() for q in terms}
+    active, seen, results = list(terms), {}, []
+    errors, totals, requests, successes = [], {}, 0, 0
+    async with httpx.AsyncClient() as client:
+        while active and requests < budget:
+            query = active.pop(0)
+            requests += 1
+            try:
+                items, meta = await search_page(
+                    query,
+                    page=cursors[query],
+                    cat_id=cat_id,
+                    city_id=city_id,
+                    sort=sort,
+                    client=client,
+                )
+            except (httpx.HTTPError, OpenSooqError) as error:
+                errors.append({"query": query, "error_type": type(error).__name__})
+                continue
+            successes += 1
+            totals[query] = meta.get("count")
+            added = False
+            for item in items:
+                ident = item["id"]
+                if ident not in query_seen[query]:
+                    added = True
+                    query_seen[query].add(ident)
+                if ident in seen:
+                    if query not in seen[ident]["source_queries"]:
+                        seen[ident]["source_queries"].append(query)
+                else:
+                    copy = {**item, "source_queries": [query]}
+                    seen[ident] = copy
+                    results.append(copy)
+            if (
+                items
+                and added
+                and cursors[query] < 50
+                and not (meta.get("pages") and cursors[query] >= meta["pages"])
+            ):
+                cursors[query] += 1
+                active.append(query)
+    if not successes:
+        raise OpenSooqError("All bilingual search queries failed; retry later")
+    return results, {
+        "count": None,
+        "queries": terms,
+        "query_totals": totals,
+        "page_requests": requests,
+        "request_budget": budget,
+        "partial": bool(errors),
+        "query_errors": errors,
+        "budget_exhausted": bool(active),
+    }
 
 
 # ---------------------------------------------------------------------------

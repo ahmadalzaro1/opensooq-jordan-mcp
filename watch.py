@@ -31,14 +31,26 @@ HERE = Path(__file__).resolve().parent
 
 
 async def find_hits(args):
-    raw = await oc.search_multi_page(
-        args.query_ar or args.query,
-        pages=args.pages,
-        city_id=resolve_city(args.city),
-        sort=oc.SORT_CODES["relevant"],
-    )
+    queries = list(dict.fromkeys(q for q in (args.query, args.query_ar) if q))
+    if len(queries) > 1:
+        raw, meta = await oc.search_bilingual(
+            queries,
+            budget=max(2, args.pages),
+            city_id=resolve_city(args.city),
+            sort=oc.SORT_CODES["relevant"],
+        )
+        if meta["partial"]:
+            raise oc.OpenSooqError("Incomplete bilingual poll; watcher state preserved")
+    else:
+        raw = await oc.search_multi_page(
+            args.query_ar or args.query,
+            pages=args.pages,
+            city_id=resolve_city(args.city),
+            sort=oc.SORT_CODES["relevant"],
+        )
+    matched_ids = {x["id"] for query in queries for x in oc.relevant_listings(query, raw)}
     matches, _ = filter_quality(
-        oc.relevant_listings(args.query_ar or args.query, raw),
+        [x for x in raw if x["id"] in matched_ids],
         condition=args.condition,
         storage_gb=args.storage_gb,
         include_risky=args.include_risky,
@@ -168,11 +180,16 @@ def main():
     args = parser.parse_args()
     if args.storage_gb is not None and not 1 <= args.storage_gb <= 8192:
         parser.error("storage-gb must be between 1 and 8192")
-    if not args.query.strip() or not math.isfinite(args.max_price) or args.max_price <= 0:
+    if (
+        not args.query.strip()
+        or (args.query_ar is not None and not args.query_ar.strip())
+        or not math.isfinite(args.max_price)
+        or args.max_price <= 0
+    ):
         parser.error("query must be nonempty and max-price must be a finite positive number")
     identity = [
         oc.COUNTRY,
-        args.query_ar or args.query,
+        [args.query.strip(), args.query_ar.strip()] if args.query_ar else args.query,
         args.city,
         args.max_price,
         args.verified_only,

@@ -10,6 +10,7 @@ import re
 from collections import Counter
 
 from market import normalize_text
+from specifications import domain_cohort
 
 ALIASES = {
     "iphone": ("ايفون", "اي فون", "ايفوون", "i phone"),
@@ -145,6 +146,8 @@ def quality(listing: dict) -> dict:
             int(x) for x in title_tokens if x in {"32", "64", "128", "256", "512", "1024", "2048"}
         )
     risks = []
+    if (listing.get("specifications") or {}).get("conflicts"):
+        risks.append("conflicting_specifications")
     accessory = re.search(
         r"\b(case|cover|charger|cable|screen protector|replacement screen)\b|كفر|كڤر|جراب|غطاء|شاحن|وصلة|وصله|حماية شاشة|حمايه للشاشه|شاشة بديلة",
         title,
@@ -235,6 +238,18 @@ def match_listing(query: str, listing: dict) -> bool:
     # Product-family anchors and explicit generations must occur in the title;
     # a seller comparing another device in the description is not a product match.
     title_hay = set(title_tokens)
+    spec = listing.get("specifications") or {}
+    if spec.get("domain") == "vehicle":
+        vehicle = spec["fields"]
+        if vehicle.get("model") in {"prius", "ioniq"}:
+            title_hay.add(vehicle["model"])
+        query_years = {t for t in required if t.isdigit() and 1900 <= int(t) <= 2100}
+        if query_years and (
+            "year_title_mismatch" in spec["conflicts"]
+            or "year" in spec["conflicts"]
+            or str(vehicle.get("year")) not in query_years
+        ):
+            return False
     if "samsung" in title_hay and "s" in title_hay and any(t.isdigit() for t in title_hay):
         title_hay.add("galaxy")
     anchors = required & {"iphone", "galaxy", "macbook", "prius", "ioniq", "playstation", "switch"}
@@ -263,6 +278,9 @@ def relevant_listings(query: str, listings: list[dict]) -> list[dict]:
 
 
 def cohort_key(listing: dict) -> str:
+    domain = domain_cohort(listing)
+    if domain is not None:
+        return domain
     q = listing.get("quality") or quality(listing)
     return f"{q['model_identity']}|{q['variant']}|storage={q['storage_gb'] or 'unknown'}|condition={q['condition']}"
 

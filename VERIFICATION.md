@@ -2,7 +2,35 @@
 
 Original upstream baseline: `1f87cac1a07b6bda74a98fc2ee6caebe7e0c0bba`.
 
+## 0.3.0 follow-up verification
+
+- **140 regression tests passed** on Python 3.12; Ruff lint/format passed.
+- All **15 retained tools** passed again through the actual locked stdio launcher
+  at **13:35 Amman time** (`2026-10-10T10:35:57Z`). Every tool remains read-only.
+- Bilingual search made two page calls, deduplicated IDs, retained source-query
+  provenance and returned null for the combined overlapping fuzzy total.
+- Live phone detail returned normalized condition and storage. Live car/property
+  searches each returned five requested results with domain specifications;
+  mileage ranges and bedrooms were present. Rental summary returned four period
+  groups. Invalid vehicle-year input returned a protocol-level error.
+- The read-only diagnostic probe returned available with zero request errors.
+- Real capped car CSV export succeeded; its UTF-8 BOM, rows, currency, evidence
+  and sample metadata were checked locally.
+- New fixtures cover nested semantic attribute keys, structured/title conflicts,
+  independent bilingual cursors despite overlap, a shared request budget,
+  partial-language failures, rental contract versus price period, mileage ranges,
+  property units, domain filters, enrichment recalculation, grouped statistics,
+  partial-sample abstention, diagnostic privacy and CSV formula/overwrite guards.
+
+These are bounded point-in-time checks. No seller was contacted, no account
+credentials were used, and no user MCP configuration or scheduler was installed.
+The cross-platform workflow runs these new tests on the PR's latest commit; see
+its current checks rather than treating the earlier 0.2.0 checks below as proof
+for a later revision.
+
 ## Local regression and startup verification
+
+The following records the preceding **0.2.0** verification.
 
 - **91 regression tests passed** on Python 3.12.
 - Ruff lint and format checks passed.

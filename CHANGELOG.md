@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0 — 10 October 2026
+
+- Fix nested OpenSooq attribute extraction; preserve semantic field keys, raw
+  values, display values and source evidence.
+- Add conservative car/property specifications, conflict detection, explicit
+  mileage/area units and domain-specific comparison cohorts.
+- Add local vehicle-year/mileage and property-room/area/rental-period/neighborhood
+  filters, plus attribute/location grouped price summaries.
+- Search both supplied English/Arabic terms with ID deduplication, independent
+  cursors, provenance, a shared maximum-five-page request budget and partial errors.
+- Merge detail attributes and recompute specifications/quality after enrichment.
+- Abstain from deals on partial samples or unknown rent price billing periods;
+  advertised contract term does not establish price cadence.
+- Add read-only local/probe diagnostics and safe, capped CSV/JSON export.
+- Preserve all 15 existing read-only MCP tools and original MIT attribution.
+
+### Compatibility notes
+
+- `query_ar` now supplements `query`; it no longer replaces it. Fuzzy totals for
+  both queries are separate, and the combined total is unknown/null.
+- Car/property cohorts become stricter; incomplete specifications may yield fewer
+  deal candidates. Conflicting specifications are flagged and excluded by default.
+- Bilingual watch defaults hash both query terms; pass `--state` to keep a chosen
+  existing state file. Single-query default filenames remain unchanged.
+
 ## 0.2.0 — 10 October 2026
 
 - Conservative bilingual identity matching with exact phone generations/tiers.
