@@ -1,168 +1,230 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.9"
-# dependencies = ["httpx>=0.27.0"]
+# requires-python = ">=3.10"
+# dependencies = ["httpx>=0.27.0,<1"]
 # ///
-"""
-OpenSooq price watcher — alert when a listing drops below a target price.
+"""Alert on new affordable listings and further price drops on known listings.
 
-A tiny standalone script (no MCP/Pydantic needed — just `httpx`) meant to be run
-on a schedule (cron / Windows Task Scheduler). On each run it:
-
-  1. Searches OpenSooq for your product (relevance-gated, so "s26 ultra" won't
-     match a Galaxy A52s — it reuses the same matcher as the MCP server).
-  2. Keeps genuine matches priced at or below your threshold.
-  3. Remembers what it has already seen (a small JSON state file), so it only
-     alerts on **new** listings — no repeat spam.
-  4. Prints each new hit, appends it to an alerts log, and (optionally) POSTs it
-     to a webhook (Discord / Slack / Telegram / your own endpoint).
-
-Examples
---------
-  # cheapest real Galaxy S26 Ultra under 320 KWD
-  python watch.py --query "samsung galaxy s26 ultra" \
-                  --query-ar "سامسونج جالاكسي اس 26 الترا" --max-price 320
-
-  # iPhone 15 Pro under 170 KWD, verified sellers only, ping a Discord webhook
-  python watch.py --query "iphone 15 pro" --query-ar "ايفون 15 برو" \
-                  --max-price 170 --verified-only \
-                  --webhook https://discord.com/api/webhooks/XXX/YYY
-
-State and logs default to files named after the query, in this folder.
-Exit code 2 means "new hits found" (handy for scripting); 0 means none.
+Run with uv run watch.py --query 'ايفون 15 برو' --max-price 400 --city عمان.
+Exit 2: alerts; 0: unchanged; 1: failure. No scheduler is installed by this script.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
-import re
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 import httpx
 
 import opensooq_client as oc
+from listing_quality import filter_quality
+from local_state import atomic_json, exclusive_lock
+from market import resolve_city
 
 HERE = Path(__file__).resolve().parent
 
 
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "watch"
-
-
-def _city_id(name: Optional[str]) -> Optional[int]:
-    if not name:
-        return None
-    name = name.strip()
-    if name.isdigit():
-        return int(name)
-    for cid, cname in oc.CITIES.items():
-        if name.lower() in cname.lower():
-            return cid
-    raise SystemExit(f"Unknown city '{name}'. Valid: {', '.join(oc.CITIES.values())}")
-
-
-async def find_hits(args: argparse.Namespace) -> List[Dict[str, Any]]:
-    eff_query = args.query_ar or args.query
-    # Fetch by RELEVANCE (not cheapest): a server-side cheapest sort only returns
-    # OpenSooq's globally-cheapest junk/decoys and never reaches the real product.
-    raw = await oc.search_multi_page(
-        eff_query, pages=args.pages, city_id=_city_id(args.city),
-        sort=oc.SORT_CODES["relevant"],
-    )
-    # Same "is this really the product?" filter the MCP server uses, then drop
-    # decoy/teaser/junk prices (e.g. 9.99 KWD installment hooks) via the median band.
-    matches = oc.relevant_listings(eff_query, raw)
-    matches, _, _ = oc.comparable_listings(matches)
-    hits = []
-    seen_ids = set()
-    for l in matches:
-        if l["id"] in seen_ids:
-            continue
-        seen_ids.add(l["id"])
-        if l["price"] <= 0 or l["price"] > args.max_price:
-            continue
-        if args.verified_only and not l["seller"]["is_verified"]:
-            continue
-        if args.shops_only and not l["seller"]["is_shop"]:
-            continue
-        hits.append(l)
-    hits.sort(key=lambda l: l["price"])
-    return hits
-
-
-def _format_hit(l: Dict[str, Any]) -> str:
-    s = l["seller"]
-    loc = ", ".join(p for p in (l["location"]["neighborhood"], l["location"]["city"]) if p)
-    seller = s["display_name"] or s["username"] or "?"
-    badge = " 🏪" if s["is_shop"] else (" ✓" if s["is_verified"] else "")
-    rating = f" ★{s['rating_avg']:.1f}({s['rating_count']})" if s["rating_count"] else ""
-    return (f"{l['price']:.0f} {l['currency']} | {l['title'][:55]} | {loc} | "
-            f"{seller}{badge}{rating} | {l['url']}")
-
-
-async def post_webhook(url: str, query: str, hits: List[Dict[str, Any]]) -> None:
-    lines = [f"🔔 OpenSooq: {len(hits)} new '{query}' listing(s) under target:"]
-    lines += [f"• {_format_hit(h)}" for h in hits]
-    text = "\n".join(lines)
-    # Works with Discord ({"content"}) and Slack/Telegram-style ({"text"}) webhooks.
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(url, json={"content": text, "text": text})
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] webhook failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def main() -> int:
-    p = argparse.ArgumentParser(description="Alert on OpenSooq listings below a target price.")
-    p.add_argument("--query", required=True, help="English search term, e.g. 'iphone 15 pro'.")
-    p.add_argument("--query-ar", default=None, help="Arabic term (better recall).")
-    p.add_argument("--max-price", required=True, type=float, help="Alert when price <= this (KWD).")
-    p.add_argument("--city", default=None, help="Optional city name/id to scope to.")
-    p.add_argument("--verified-only", action="store_true", help="Only verified sellers.")
-    p.add_argument("--shops-only", action="store_true", help="Only professional 'shop' sellers.")
-    p.add_argument("--pages", type=int, default=5, help="Result pages to scan (default 5).")
-    p.add_argument("--state", default=None, help="Seen-IDs JSON file (default: watch-<query>.json).")
-    p.add_argument("--log", default=None, help="Alerts log file (default: watch-<query>.log).")
-    p.add_argument("--webhook", default=None, help="Optional webhook URL (Discord/Slack/Telegram).")
-    args = p.parse_args()
-
-    base = _slug(args.query)
-    state_path = Path(args.state) if args.state else HERE / f"watch-{base}.json"
-    log_path = Path(args.log) if args.log else HERE / f"watch-{base}.log"
-
-    seen = set()
-    if state_path.exists():
-        try:
-            seen = set(json.loads(state_path.read_text(encoding="utf-8")))
-        except Exception:
-            seen = set()
-
-    hits = asyncio.run(find_hits(args))
-    new_hits = [h for h in hits if h["id"] not in seen]
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    if new_hits:
-        print(f"[{now}] {len(new_hits)} NEW '{args.query}' listing(s) <= {args.max_price:.0f} KWD:")
-        with log_path.open("a", encoding="utf-8") as logf:
-            for h in new_hits:
-                line = _format_hit(h)
-                print("  " + line)
-                logf.write(f"{now} | {line}\n")
-        if args.webhook:
-            asyncio.run(post_webhook(args.webhook, args.query, new_hits))
+async def find_hits(args):
+    queries = list(dict.fromkeys(q for q in (args.query, args.query_ar) if q))
+    if len(queries) > 1:
+        raw, meta = await oc.search_bilingual(
+            queries,
+            budget=max(2, args.pages),
+            city_id=resolve_city(args.city),
+            sort=oc.SORT_CODES["relevant"],
+        )
+        if meta["partial"]:
+            raise oc.OpenSooqError("Incomplete bilingual poll; watcher state preserved")
     else:
-        print(f"[{now}] no new '{args.query}' listings <= {args.max_price:.0f} KWD "
-              f"({len(hits)} match the price, all already seen).")
+        raw = await oc.search_multi_page(
+            args.query_ar or args.query,
+            pages=args.pages,
+            city_id=resolve_city(args.city),
+            sort=oc.SORT_CODES["relevant"],
+        )
+    matched_ids = {x["id"] for query in queries for x in oc.relevant_listings(query, raw)}
+    matches, _ = filter_quality(
+        [x for x in raw if x["id"] in matched_ids],
+        condition=args.condition,
+        storage_gb=args.storage_gb,
+        include_risky=args.include_risky,
+    )
+    # Threshold watches retain genuinely cheap matches rather than applying a median cut.
+    matches = [listing for listing in matches if listing["currency"] == oc.CURRENCY]
+    return sorted(
+        [
+            listing
+            for listing in matches
+            if 0 < listing["price"] <= args.max_price
+            and (not args.verified_only or listing["seller"]["is_verified"])
+            and (not args.shops_only or listing["seller"]["is_shop"])
+        ],
+        key=lambda listing: listing["price"],
+    )
 
-    # Persist the full set of currently-matching ids so we don't re-alert.
-    seen.update(h["id"] for h in hits)
-    state_path.write_text(json.dumps(sorted(seen)), encoding="utf-8")
-    return 2 if new_hits else 0
+
+def select_alerts(hits, state):
+    """Track the last notified price, so unchanged hits never alert twice."""
+    prices = dict(state.get("prices", {}))
+    legacy = set(state.get("legacy_seen", []))
+    alerts = []
+    seen = set()
+    for hit in hits:
+        if hit["id"] in seen:
+            continue
+        seen.add(hit["id"])
+        ident, price = hit["id"], hit["price"]
+        previous = prices.get(ident)
+        if previous is None and ident not in legacy:
+            alerts.append({**hit, "alert_type": "new_match", "previous_price": None})
+            prices[ident] = price
+        elif previous is not None and price < previous:
+            alerts.append({**hit, "alert_type": "price_drop", "previous_price": previous})
+            prices[ident] = price
+        elif previous is None:
+            prices[ident] = price  # establish a baseline when migrating old seen-ID state
+    return alerts, {
+        "version": 2,
+        "country": oc.COUNTRY,
+        "prices": prices,
+        "legacy_seen": sorted(legacy - prices.keys()),
+    }
+
+
+def load_state(path):
+    if not path.exists():
+        return {"version": 2, "country": oc.COUNTRY, "prices": {}}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, list):
+        if any(not isinstance(ident, str) or not ident.isdigit() for ident in value):
+            raise ValueError("Invalid legacy watcher IDs")
+        return {"version": 2, "country": oc.COUNTRY, "prices": {}, "legacy_seen": value}
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 2
+        or value.get("country") != oc.COUNTRY
+    ):
+        raise ValueError(
+            "Unsupported watcher state or different country; use a separate --state file"
+        )
+    prices = value.get("prices")
+    if not isinstance(prices, dict) or any(
+        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+        for v in prices.values()
+    ):
+        raise ValueError("Invalid watcher prices; state has been preserved")
+    if any(not isinstance(k, str) or not k.isdigit() for k in prices):
+        raise ValueError("Invalid watcher listing IDs")
+    legacy = value.get("legacy_seen", [])
+    if not isinstance(legacy, list) or any(
+        not isinstance(k, str) or not k.isdigit() for k in legacy
+    ):
+        raise ValueError("Invalid legacy watcher state")
+    return value
+
+
+def save_state(path, state):
+    atomic_json(path, state)
+
+
+def _format_hit(hit):
+    previous = hit.get("previous_price")
+    prefix = f"DROP {previous:.3f} → " if previous is not None else "NEW "
+    return f"{prefix}{hit['price']:.3f} {hit['currency']} | {hit['title']} | {hit['url']}"
+
+
+async def post_webhook(url, query, hits, kind="discord"):
+    header = f"OpenSooq {oc.COUNTRY}: '{query}'\n"
+    limit = 1900 if kind == "discord" else 3500
+    messages = []
+    current = header[:300]
+    for hit in hits:
+        line = _format_hit(hit)[: limit - 350] + "\n"
+        if len(current) + len(line) > limit:
+            messages.append(current)
+            current = header[:300]
+        current += line
+    if current:
+        messages.append(current)
+    async with httpx.AsyncClient(timeout=10) as client:
+        for text in messages:
+            payload = {"content" if kind == "discord" else "text": text}
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=f"Watch OpenSooq {oc.COUNTRY} prices ({oc.CURRENCY})."
+    )
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--query-ar")
+    parser.add_argument("--max-price", type=float, required=True)
+    parser.add_argument("--city")
+    parser.add_argument("--condition", choices=["all", "new", "used"], default="all")
+    parser.add_argument("--storage-gb", type=int)
+    parser.add_argument("--include-risky", action="store_true")
+    parser.add_argument("--pages", type=int, default=3, choices=range(1, 6))
+    parser.add_argument("--verified-only", action="store_true")
+    parser.add_argument("--shops-only", action="store_true")
+    parser.add_argument("--state")
+    parser.add_argument("--log")
+    parser.add_argument("--webhook")
+    parser.add_argument("--webhook-kind", choices=["discord", "slack"], default="discord")
+    args = parser.parse_args()
+    if args.storage_gb is not None and not 1 <= args.storage_gb <= 8192:
+        parser.error("storage-gb must be between 1 and 8192")
+    if (
+        not args.query.strip()
+        or (args.query_ar is not None and not args.query_ar.strip())
+        or not math.isfinite(args.max_price)
+        or args.max_price <= 0
+    ):
+        parser.error("query must be nonempty and max-price must be a finite positive number")
+    identity = [
+        oc.COUNTRY,
+        [args.query.strip(), args.query_ar.strip()] if args.query_ar else args.query,
+        args.city,
+        args.max_price,
+        args.verified_only,
+        args.shops_only,
+        args.condition,
+        args.storage_gb,
+        args.include_risky,
+    ]
+    key = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:16]
+    state_path = Path(args.state) if args.state else HERE / f"watch-{oc.COUNTRY}-{key}.json"
+    log_path = Path(args.log) if args.log else HERE / f"watch-{oc.COUNTRY}-{key}.log"
+    try:
+        with exclusive_lock(state_path.with_name(state_path.name + ".lock")):
+            state = load_state(state_path)
+            alerts, updated = select_alerts(asyncio.run(find_hits(args)), state)
+            if alerts:
+                if args.webhook:
+                    asyncio.run(post_webhook(args.webhook, args.query, alerts, args.webhook_kind))
+                now = datetime.now(timezone.utc).isoformat()
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as handle:
+                    for hit in alerts:
+                        line = f"{now} | {_format_hit(hit)}"
+                        print(line)
+                        handle.write(line + "\n")
+            else:
+                print("No new matches or further price drops.")
+            save_state(state_path, updated)
+            return 2 if alerts else 0
+    except Exception as error:
+        # Avoid exposing webhook URLs containing secrets in error messages.
+        print(
+            f"Watcher failed: {type(error).__name__}; state preserved for retry.", file=sys.stderr
+        )
+        return 1
 
 
 if __name__ == "__main__":

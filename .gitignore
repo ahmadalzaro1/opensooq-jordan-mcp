@@ -9,3 +9,9 @@ __pycache__/
 # Price-watcher state + logs (watch.py)
 watch-*.json
 watch-*.log
+
+# Local lint/test caches and advisory lock files
+.pytest_cache/
+.ruff_cache/
+watch-*.json.lock
+watch-*.json.*.tmp
