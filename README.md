@@ -1,40 +1,38 @@
 # OpenSooq Jordan MCP
 
-An unofficial, read-only MCP server for searching Jordan's OpenSooq marketplace,
-comparing asking prices, inspecting listings, and filtering sellers by verification
-and review evidence. Forked from [isaamthalhath07/opensooq-mcp](https://github.com/isaamthalhath07/opensooq-mcp).
-Original MIT attribution is preserved in `LICENSE`.
+An unofficial, read-only MCP server for Jordan's OpenSooq marketplace. Search
+listings, inspect seller information, compare sampled asking prices, and watch
+qualifying listings for further price reductions.
 
-Jordan is the default: `jo.opensooq.com`, JOD prices, 17 top-level categories and
-14 cities. The bundled Jordan taxonomy was obtained from a live search response
-on **10 October 2026**. Names and IDs can change; the tools identify their catalog
-as a dated snapshot. Kuwait remains available with `OPENSOOQ_COUNTRY=kw`, using
-the smaller inherited catalog.
+Forked from [Isaam Thalhath's opensooq-mcp](https://github.com/isaamthalhath07/opensooq-mcp).
+The original MIT license and attribution are preserved. This fork defaults to
+`jo.opensooq.com` and JOD. Its 17 top-level categories and 14 city filters were
+verified against a live Jordan response on **10 October 2026**. Kuwait remains
+selectable with `OPENSOOQ_COUNTRY=kw`; that inherited catalog has fewer categories.
 
-## Run
+## Start
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), clone this fork,
-and launch:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run:
 
 ```sh
 git clone --branch jordan-support https://github.com/ahmadalzaro1/opensooq-jordan-mcp.git
 cd opensooq-jordan-mcp
-uv run server.py
+uv run --locked server.py
 ```
 
-`server.py` runs over stdio and waits for an MCP client. It does not open a web
-server. Python 3.12 is pinned in `.python-version`; supported Python versions
-start at 3.10. The MCP SDK is constrained to v1 because this implementation uses
-FastMCP. The inline dependency metadata and `requirements.txt` agree.
+The server speaks **stdio MCP** and waits for a client; it does not open a web
+server. Python 3.12 is selected by `.python-version`. Python 3.10+ is supported.
+The MCP SDK is constrained to v1 for FastMCP compatibility. `server.py.lock`,
+`watch.py.lock` and `uv.lock` make script and development dependencies reproducible.
 
-Configure a stdio MCP client (Claude Desktop, Cursor, Windsurf, or another host):
+A stdio client's configuration:
 
 ```json
 {
   "mcpServers": {
     "opensooq-jordan": {
       "command": "/ABSOLUTE/PATH/TO/uv",
-      "args": ["run", "--directory", "/ABSOLUTE/PATH/TO/opensooq-jordan-mcp", "server.py"],
+      "args": ["run", "--locked", "--directory", "/ABSOLUTE/PATH/TO/opensooq-jordan-mcp", "server.py"],
       "env": {
         "PYTHONIOENCODING": "utf-8",
         "OPENSOOQ_COUNTRY": "jo",
@@ -45,16 +43,11 @@ Configure a stdio MCP client (Claude Desktop, Cursor, Windsurf, or another host)
 }
 ```
 
-`OPENSOOQ_LANGUAGE` accepts `en` or `ar` and selects upstream locale. Queries,
-city names and category names accept either language independently. Environment
-configuration is read at process startup; restart the server after changing it.
-Unsupported country or locale values fail explicitly.
-
-`python install.py --print-only` prints configuration without provisioning Python,
-installing dependencies or editing client files (uv must already be available).
-`python install.py` provisions dependencies and adds `opensooq-jordan` to each
-supported client it detects, with unique timestamped backups. It does not configure
-Codex automatically. Manual configuration lets you target a single client.
+Country accepts `jo` or `kw`; locale accepts `en` or `ar`. Configuration is read at
+startup. Queries and city/category names accept Arabic or English independently
+of locale. Arabic diacritics, common letter variants and Arabic/Persian digits are
+normalized. The alias dictionary covers common products; it does not translate
+arbitrary English queries into Arabic. `query_ar` overrides `query` when supplied.
 
 ## Tools
 
@@ -68,104 +61,159 @@ Codex automatically. Manual configuration lets you target a single client.
 
 Examples:
 
-- “Find iPhone 15 Pro listings in Amman below 400 JOD.”
-- “ابحث عن ايفون 15 برو في عمان.”
-- “Compare asking prices for Toyota Prius and Hyundai Ioniq in Jordan.”
+- “Find iPhone 15 Pro listings in Amman, used, 256 GB, below 450 JOD.”
+- “ابحث عن تويوتا بريوس في عمان.”
 - “Show verified sellers with a rating of at least 4 and at least 10 reviews.”
+- “Compare iPhone 14 and iPhone 15 asking prices in Amman.”
 
-Most discovery tools support Markdown or JSON. `opensooq_search_listings` accepts
-`query`, optional `query_ar` (which overrides the query), `city`, `category`, `sort`,
-`page`, `limit`, `min_price`, `max_price`, `strict_match`, and seller/media filters.
-`min_seller_reviews` defaults to 0 for general search; trusted-seller discovery
-uses `min_reviews=5` by default. Ambiguous city/category names produce an error
-instead of silently selecting the first partial match. Numeric category IDs can
-also address subcategories; city IDs must exist in the selected market catalog.
+Most listing tools accept `response_format: "json" | "markdown"`; analytics and
+reference tools return JSON. Empty results remain structured, with empty arrays
+or null statistics. Expired/unknown listing IDs return `found=false`. Network,
+authentication, invalid-input and schema errors are reported as **MCP tool errors**
+rather than successful text responses that happen to contain an error message.
+Comparison tools retain per-query failures so a successful query is not lost.
 
-## Improvements over upstream
+## Product matching and offer quality
 
-- Market configuration replaces hardcoded Kuwait routing, cookies, currency and locale.
-- Arabic city/category names, diacritics, letter variants and Arabic/Persian digits work.
-- Arabic decimal/thousands separators and JOD fractional prices are parsed.
-- Paginated samples deduplicate listings and stop at the upstream last page.
-- Locally sorted search samples honor `page` and `limit`; empty search results in
-  JSON mode retain a structured response. The upstream total is identified as
-  the fuzzy count before local filtering.
-- Price summaries identify their sample and use interpolated quartiles. Other
-  currencies are excluded rather than mixed into the selected market's prices.
-- Seller filters can require a review count; ratings and verification are explicitly
-  described as signals rather than guarantees.
-- Requests are spaced at least 300 ms per process. HTTP 429/502/503/504 responses
-  get at most two retries, honoring numeric `Retry-After` up to 10 seconds.
-  Longer delays return the error for the caller to handle. Authentication gets
-  one fresh-registration retry; schema drift produces a clear error.
-- Page enrichment only fetches HTTPS URLs on the selected market's host and
-  follows at most three redirects after validating each target host. Targeted listing/seller lookups validate returned IDs.
-- The watcher tracks previously notified prices and alerts on further drops.
-  Webhook failures retain state for retry; malformed state is preserved and fails.
-- Offline regression tests and a Python 3.10/3.12/3.13 GitHub Actions matrix.
+The matcher checks every significant query term, with bilingual aliases for common
+brands and products. Recognized product families and explicit phone generations
+must appear in the title; another device mentioned in a seller's description is
+not enough. Explicit phone generations use exact tiers, so “iPhone 15 Pro” does
+not also match “iPhone 15 Pro Max”. This intentionally favors precision over recall.
 
-## Price watcher
+Normalized listings include `quality`:
+
+- `condition`: `new`, `used` or `unknown`; “like new” is used.
+- `storage_gb`: one identifiable capacity; missing or conflicting capacities stay null.
+- `variant`, `model_identity`, and `identity_hint`.
+- `risk_flags`: accessories, payment offers, damaged items, wanted/exchange ads,
+  multiple capacities or multiple phone generations when detected.
+
+`opensooq_search_listings` and price tools support `condition` and `storage_gb`.
+Unknown specifications are excluded when a specific filter is selected. Risky
+advertisements are excluded by default; use `include_risky=true` to inspect them
+or deliberately search for accessories. General latest/category browsing can show
+flagged offers, which remain labeled in the returned listing.
+
+The rules are explainable heuristics. They can reject a legitimate listing or miss
+a misleading one. Titles, descriptions and available API attributes are evidence,
+not a guarantee of an item's condition. RAM versus storage and less familiar
+product spellings can remain ambiguous. Check the listing before deciding.
+
+## Price analysis
+
+Price tools support city, category, condition, capacity, and a bounded page budget
+(1–5). Samples deduplicate IDs and stop at the last or empty page. JOD fractional
+prices and Arabic separators are parsed; another currency is excluded rather
+than mixed into calculations. Unknown dates stay null rather than appearing new.
+
+Summaries report aggregate statistics **and separate cohorts** by recognized
+model, tier, capacity and condition. Recognized Prius/Ioniq vehicle years are also
+separated. Quartiles use linear interpolation. Broad outlier filtering is applied
+within cohorts, rather than excluding new-device prices against a used-device
+median. Aggregated medians can still mix specifications: inspect the cohorts.
+
+Deal candidates are compared with their **own cohort median**. Each candidate
+includes its baseline size and median. The default `min_sample=5` requires five
+priced listings in that cohort. Cohorts containing unknown specifications do not
+produce deals; the tool returns their unusable baseline explicitly. No result is
+presented as a guaranteed bargain, sale price or formal valuation.
+
+Cheapest/priciest search scans up to five relevance pages and sorts locally. Its
+pagination operates on that sample. `total` is the upstream fuzzy count **before
+local filtering**, while `sample_count` is the filtered sample size. Searching
+cannot guarantee the cheapest listing across the entire marketplace. Price-ranked
+search and threshold watches do not discard a match simply because it is cheap;
+offer flags and identity checks are used instead of a global median cutoff.
+
+## Watch prices
 
 ```sh
-uv run watch.py --query 'ايفون 15 برو' --city عمان --max-price 400
+uv run --locked watch.py --query 'ايفون 15 برو' --city عمان \
+  --condition used --storage-gb 256 --max-price 400
 ```
 
-Alerts identify `NEW` matches or `DROP` events. Prices display three decimal
-places. An unchanged price or a price rebound above the last alerted low does
-not repeat an alert. This is a bounded search sample, so disappearance from the
-sample does not mean the listing was sold. State only tracks qualifying listings,
-not the full market's historical prices. Old seen-ID state files migrate by
-establishing a price baseline without repeating old notifications.
+The watcher reports new qualifying listings and further drops below the last
+notified price. Unchanged prices and rebounds do not repeat notifications. It
+uses the same identity/offer filters as search, and checks the selected currency.
+An exclusive file lock prevents overlapping processes from modifying the same
+state. JSON writes are atomic, malformed state is preserved, and old seen-ID
+files migrate by establishing a baseline without repeating old alerts.
+
+State filenames include the market and a hash of query/filter settings. Only
+qualifying listings are tracked, not complete marketplace price history. A listing
+missing from the next sample has not necessarily been sold or removed.
 
 Optional delivery:
 
 ```sh
-uv run watch.py --query 'ايفون 15 برو' --max-price 400 \
+uv run --locked watch.py --query 'ايفون 15 برو' --max-price 400 \
   --webhook 'YOUR_WEBHOOK_URL' --webhook-kind discord
 ```
 
-Discord and Slack payloads are supported explicitly (`--webhook-kind slack`).
-No scheduler is installed automatically. Avoid overlapping runs sharing one
-state file. Default state filenames include the country and a hash of the query,
-city, target price and seller filters. Exit codes: **2** alerts, **0** unchanged,
-**1** operational failure. A webhook failure prevents state advancement; delivery
-is at least once, so a later failure after delivery can produce a duplicate retry.
-State/log files can include listing links; keep them local.
+Discord and Slack have explicit payload formats (`--webhook-kind slack`). Messages
+are split to fit payload limits. No real webhook was contacted in verification;
+HTTP acceptance and failure paths are covered with mocks. A rejected webhook
+prevents state advancement. Delivery is at least once: a later failure after
+partial delivery can result in duplicate retries. Webhook credentials are not
+printed in errors. Exit codes: **2** alerts, **0** unchanged, **1** failure.
+No scheduler is installed automatically.
 
-## Tests and opt-in live checks
+## Optional installer
+
+`python install.py --print-only` prints configuration without provisioning or
+editing client files; uv must already be available.
+
+`python install.py --client Cursor` provisions dependencies, verifies imports,
+and configures only that detected client. The default selects all detected clients
+among Claude Desktop, Cursor, Antigravity and Windsurf. Config updates use a lock,
+atomic replacement, and unique backups. Invalid JSON/config shapes are preserved
+and skipped. Codex is not configured automatically.
+
+## Verify and develop
 
 ```sh
-uv run --with pytest --with 'mcp>=1.2.0,<2' --with httpx --with pydantic python -m pytest -q
-uv run --with 'mcp>=1.2.0,<2' --with httpx --with pydantic python troubleshoot.py --live
+uv sync --locked --group dev
+uv run --locked --group dev pytest -q
+uv run --locked --group dev ruff check .
+uv run --locked --group dev ruff format --check .
+
+# Explicit live tests through an actual MCP stdio client:
+uv run --locked python troubleshoot.py --live
+uv run --locked python troubleshoot.py --live --all
 ```
 
-Unit tests use fixtures and mocked HTTP, without contacting OpenSooq. Live
-checks are explicit and small: a Jordan search scoped to Amman/mobile phones,
-one listing lookup and a one-page price summary. See `VERIFICATION.md` for the
-checks performed on this fork.
+The full live check exercises all 15 tools, cars/property, seller lookup, empty
+results and invalid inputs. It makes a modest sequence of real read-only requests.
+Offline tests do not contact OpenSooq. CI checks Python 3.10/3.12/3.13 on Linux,
+plus Python 3.12 on macOS and Windows. See `VERIFICATION.md` for actual results.
 
-## Limits
+## Maintenance and limits
 
-This is a community project, with no claimed OpenSooq endorsement. It accesses
-private website endpoints using the website's anonymous-device handshake.
-Those endpoints, signing rules, catalog IDs and HTML can change at any time.
-No logged-in seller-phone reveal, posting, messaging, editing or purchasing tools
-are provided. Seller phone numbers remain masked.
+This is a community integration with no claimed OpenSooq endorsement. It uses
+private website endpoints and an anonymous-device signing handshake. APIs, signing,
+HTML and catalog IDs can change. The catalog is a dated bundled snapshot, not an
+automatically refreshed source. HTTP calls are spaced by at least 300 ms per
+process, retry transient network/server failures at most twice, and honor bounded
+numeric or HTTP-date `Retry-After`. Access blocks are surfaced, not bypassed.
 
-Price/deal estimates describe **asking prices in a filtered sample**, not completed
-sales, valuations or the entire inventory. Cheapest/priciest search scans up to
-five relevance pages and sorts that sample locally; a result is not guaranteed to
-be the cheapest on OpenSooq. Keyword matching and broad price-band heuristics
-can include unrelated products or omit genuine bargains. Product condition,
-capacity, trim, location and payment terms must be checked before comparing.
-Rich details are scraped best-effort and can be absent.
+Rich details are parsed from structured Next.js JSON and decoded Flight rows,
+including nested JSON strings. Key order and nested seller fields are supported.
+Each detail-page redirect must remain HTTPS on the selected market host. A page
+with a different listing ID is rejected. Enrichment failure leaves the API listing
+available. Full details can still be unavailable after a website change.
 
-## Layout
+No seller contact, posting, editing, purchasing or logged-in phone-reveal tools
+are provided. Phone reveal keys are never included in normalized output. Seller
+verification/review filters provide signals, not a guarantee of trustworthiness.
 
-- `market.py`, `catalogs.json`: validated environment configuration and bilingual taxonomy.
-- `opensooq_client.py`: anonymous handshake, bounded requests, parsing and pagination.
-- `server.py`: 15 FastMCP tools and input validation.
-- `watch.py`: threshold and price-drop alerts with local state.
-- `install.py`: optional client configuration helper.
-- `tests/`: offline regression tests.
-- `troubleshoot.py`: explicit live smoke check.
+## Files
+
+- `market.py`, `catalogs.json`: market configuration and bilingual reference data.
+- `listing_quality.py`: deterministic matching, offer flags and comparison cohorts.
+- `opensooq_client.py`: anonymous access, bounded HTTP, parsing and pagination.
+- `page_parser.py`: structured page enrichment.
+- `server.py`: validated inputs and 15 read-only MCP tools.
+- `watch.py`, `local_state.py`: alerts, atomic state and process locking.
+- `install.py`: optional client configuration.
+- `troubleshoot.py`, `tests/`: explicit live checks and offline regressions.

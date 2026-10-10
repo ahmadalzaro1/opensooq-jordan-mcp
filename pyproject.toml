@@ -1,0 +1,19 @@
+[project]
+name = "opensooq-jordan-mcp"
+version = "0.2.0"
+description = "Read-only Jordan marketplace MCP with bilingual matching and sampled price cohorts"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2.0,<2", "httpx>=0.27.0,<1", "pydantic>=2.0.0,<3"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

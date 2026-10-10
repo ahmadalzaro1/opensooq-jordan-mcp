@@ -1,5 +1,7 @@
 """Validated market configuration and bilingual catalog resolution."""
+
 from __future__ import annotations
+
 import json
 import os
 import re
@@ -21,11 +23,14 @@ CITY_DETAILS = {int(k): v for k, v in PROFILE["cities"].items()}
 CITIES = {k: v["en"] for k, v in CITY_DETAILS.items()}
 
 _DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
 def normalize_text(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).lower().translate(_DIGITS)
     value = re.sub(r"[\u064b-\u065f\u0670ـ]", "", value)
-    value = value.translate(str.maketrans({"أ":"ا", "إ":"ا", "آ":"ا", "ى":"ي"}))
+    value = value.translate(str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي"}))
     return " ".join(value.split())
+
 
 def resolve(value: str | None, catalog: dict, label: str) -> int | None:
     if value is None:
@@ -48,13 +53,17 @@ def resolve(value: str | None, catalog: dict, label: str) -> int | None:
         return matches[0]
     if matches:
         raise ValueError(f"Ambiguous {label} '{value}'; use a full name or ID")
-    raise ValueError(f"Unknown {label} '{value}' for {PROFILE['name']}; list available {label}s first")
+    raise ValueError(
+        f"Unknown {label} '{value}' for {PROFILE['name']}; list available {label}s first"
+    )
+
 
 def resolve_city(value: str | None) -> int | None:
     ident = resolve(value, CITY_DETAILS, "city")
     if ident is not None and ident not in CITY_DETAILS:
         raise ValueError(f"Unknown city ID {ident} for {PROFILE['name']}")
     return ident
+
 
 def resolve_category(value: str | None) -> int | None:
     return resolve(value, CATEGORIES, "category")

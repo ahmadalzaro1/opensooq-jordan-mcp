@@ -2,7 +2,7 @@
 """
 One-command installer for the OpenSooq MCP server.
 
-Run it with any Python:  `python install.py`   (it only orchestrates — no deps).
+Run it with Python 3.10+:  `python install.py`   (it only orchestrates — no deps).
 
 What it does:
   1. Finds `uv` (the only prerequisite); prints how to get it if missing.
@@ -17,7 +17,7 @@ What it does:
 
 Flags:
   --print-only   Don't modify any client config; just print the block + targets.
-  --name NAME    Server name in the config (default: opensooq).
+  --name NAME    Server name in the config (default: opensooq-jordan).
 """
 
 from __future__ import annotations
@@ -29,16 +29,22 @@ import platform
 import shutil
 import subprocess
 import time
-import sys
 from pathlib import Path
 
+from local_state import atomic_json, exclusive_lock
+
 HERE = Path(__file__).resolve().parent
-PY_PIN = (HERE / ".python-version").read_text(encoding="utf-8").strip() if (HERE / ".python-version").exists() else "3.12"
+PY_PIN = (
+    (HERE / ".python-version").read_text(encoding="utf-8").strip()
+    if (HERE / ".python-version").exists()
+    else "3.12"
+)
 
 
 # --------------------------------------------------------------------------- #
 # locate uv
 # --------------------------------------------------------------------------- #
+
 
 def find_uv() -> str | None:
     onpath = shutil.which("uv")
@@ -66,7 +72,7 @@ def find_uv() -> str | None:
 UV_INSTALL_HINT = (
     "uv is not installed. Install it (one command), then re-run this script:\n"
     "  macOS/Linux : curl -LsSf https://astral.sh/uv/install.sh | sh\n"
-    "  Windows     : powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"\n"
+    '  Windows     : powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"\n'
     "Then restart your terminal so `uv` is on PATH."
 )
 
@@ -74,6 +80,7 @@ UV_INSTALL_HINT = (
 # --------------------------------------------------------------------------- #
 # provision + verify
 # --------------------------------------------------------------------------- #
+
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, **kw)
@@ -83,13 +90,27 @@ def ensure_runtime(uv: str) -> bool:
     print(f"• Ensuring Python {PY_PIN} is available to uv …")
     r = run([uv, "python", "install", PY_PIN], capture_output=True, text=True)
     if r.returncode != 0 and "No such host" in (r.stderr or ""):
-        print("  ! Could not reach GitHub to download Python. If it's already cached "
-              "this is fine; otherwise connect to the internet once and re-run.")
+        print(
+            "  ! Could not reach GitHub to download Python. If it's already cached "
+            "this is fine; otherwise connect to the internet once and re-run."
+        )
     print("• Caching dependencies and verifying the server imports …")
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    r = run([uv, "run", "--directory", str(HERE), "python", "-c",
-             "import server; print('  ✓ server loaded:', len(__import__('asyncio').run(server.mcp.list_tools())), 'tools')"],
-            text=True, env=env)
+    r = run(
+        [
+            uv,
+            "run",
+            "--directory",
+            str(HERE),
+            "--with-requirements",
+            str(HERE / "requirements.txt"),
+            "python",
+            "-c",
+            "import server; print('  ✓ server loaded:', len(__import__('asyncio').run(server.mcp.list_tools())), 'tools')",
+        ],
+        text=True,
+        env=env,
+    )
     return r.returncode == 0
 
 
@@ -97,10 +118,11 @@ def ensure_runtime(uv: str) -> bool:
 # config
 # --------------------------------------------------------------------------- #
 
+
 def server_entry(uv: str, name: str) -> dict:
     return {
         "command": uv,
-        "args": ["run", "--directory", str(HERE), "server.py"],
+        "args": ["run", "--locked", "--directory", str(HERE), "server.py"],
         "env": {"PYTHONIOENCODING": "utf-8", "OPENSOOQ_COUNTRY": "jo"},
     }
 
@@ -127,7 +149,7 @@ def client_targets() -> dict[str, tuple[Path, Path]]:
     }
 
 
-def merge_into(path: Path, name: str, entry: dict) -> str:
+def _merge_into(path: Path, name: str, entry: dict) -> str:
     """Merge our server entry into an MCP config file. Returns a status string."""
     data: dict = {}
     if path.exists():
@@ -138,22 +160,48 @@ def merge_into(path: Path, name: str, entry: dict) -> str:
             shutil.copy2(path, backup)
             return f"existing file was not valid JSON; backed up to {backup.name} and skipped"
         shutil.copy2(path, path.with_suffix(path.suffix + f".{time.time_ns()}.bak"))
+    if not isinstance(data, dict) or (
+        "mcpServers" in data and not isinstance(data["mcpServers"], dict)
+    ):
+        return "invalid config shape; skipped without modifying the file"
     servers = data.setdefault("mcpServers", {})
     action = "updated" if name in servers else "added"
     servers[name] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_json(path, data)
     return action
+
+
+def merge_into(path: Path, name: str, entry: dict) -> str:
+    with exclusive_lock(path.with_name(path.name + ".lock")):
+        return _merge_into(path, name, entry)
 
 
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Install the OpenSooq MCP server into your MCP clients.")
-    ap.add_argument("--print-only", action="store_true", help="Only print the config; don't modify client files.")
-    ap.add_argument("--name", default="opensooq-jordan", help="Server name in the config (default: opensooq-jordan).")
+    ap = argparse.ArgumentParser(
+        description="Install the OpenSooq MCP server into your MCP clients."
+    )
+    ap.add_argument(
+        "--print-only",
+        action="store_true",
+        help="Only print the config; don't modify client files.",
+    )
+    ap.add_argument(
+        "--name",
+        default="opensooq-jordan",
+        help="Server name in the config (default: opensooq-jordan).",
+    )
+    ap.add_argument(
+        "--client",
+        choices=["all", "Claude Desktop", "Cursor", "Antigravity (Gemini)", "Windsurf"],
+        default="all",
+        help="Configure only the selected client, or all detected clients.",
+    )
     args = ap.parse_args()
 
     print("OpenSooq MCP — installer\n" + "=" * 28)
@@ -182,18 +230,24 @@ def main() -> int:
     print("\n• Installing into detected MCP clients …")
     any_written = False
     for cname, (marker, cfg) in client_targets().items():
+        if args.client != "all" and args.client != cname:
+            continue
         if marker.exists():
             status = merge_into(cfg, args.name, entry)
             print(f"  ✓ {cname}: {status}  ->  {cfg}")
-            any_written = True
+            any_written = any_written or status in {"added", "updated"}
         else:
             print(f"  – {cname}: not detected (skipped)")
 
     if any_written:
-        print("\nDone. Fully restart the client(s) above, then ask: "
-              "\"search OpenSooq for iphone 15 pro\".")
+        print(
+            "\nDone. Fully restart the client(s) above, then ask: "
+            '"search OpenSooq for iphone 15 pro".'
+        )
     else:
-        print("\nNo known MCP clients detected. Paste the block above into your client's config manually.")
+        print(
+            "\nNo known MCP clients detected. Paste the block above into your client's config manually."
+        )
     return 0
 
 
